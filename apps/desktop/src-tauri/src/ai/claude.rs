@@ -89,33 +89,75 @@ impl AiBackend for ClaudeCliBackend {
         .map_err(|_| "Claude CLI timed out".to_string())?
         .map_err(|e| format!("Claude CLI spawn failed: {e}"))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "Claude CLI exited with status {}: {}",
-                output.status,
-                stderr.trim()
-            ));
-        }
-
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // The CLI's JSON shape: { "result": "...", "is_error": bool, ... }.
-        // Extra fields are permitted (we ignore unknowns).
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The CLI emits JSON on stdout even in the error path, so parse
+        // stdout first and prefer its message. Only fall back to the raw
+        // status + stderr if stdout isn't parseable (CLI not installed,
+        // killed by signal, etc).
         #[derive(Deserialize)]
+        #[serde(default)]
         struct Envelope {
             result: String,
-            #[serde(default)]
             is_error: bool,
+            #[serde(rename = "api_error_status")]
+            api_error_status: Option<String>,
+            subtype: Option<String>,
         }
-        let env: Envelope = serde_json::from_str(stdout.trim())
-            .map_err(|e| format!("Claude CLI JSON parse: {e} ;; stdout was: {stdout}"))?;
-        if env.is_error {
-            return Err(env.result);
+        impl Default for Envelope {
+            fn default() -> Self {
+                Self {
+                    result: String::new(),
+                    is_error: false,
+                    api_error_status: None,
+                    subtype: None,
+                }
+            }
         }
-        Ok(AiResponse {
-            text: env.result.trim().to_string(),
-            backend: Self::default().id().to_string(),
-        })
+
+        match serde_json::from_str::<Envelope>(stdout.trim()) {
+            Ok(env) => {
+                if env.is_error || !output.status.success() {
+                    // The CLI's error message goes in `result`. Other
+                    // diagnostic bits (subtype, api_error_status) come
+                    // through too so we can tell auth issues from
+                    // rate-limits from transport errors.
+                    let hint = env
+                        .subtype
+                        .filter(|s| s != "success")
+                        .map(|s| format!(" [{s}]"))
+                        .unwrap_or_default();
+                    let api = env
+                        .api_error_status
+                        .map(|s| format!(" (api status: {s})"))
+                        .unwrap_or_default();
+                    let msg = if env.result.is_empty() {
+                        format!("Claude CLI failed{hint}{api}")
+                    } else {
+                        format!("{}{hint}{api}", env.result)
+                    };
+                    return Err(msg);
+                }
+                Ok(AiResponse {
+                    text: env.result.trim().to_string(),
+                    backend: Self::default().id().to_string(),
+                })
+            }
+            Err(parse_err) => {
+                // Non-JSON output means the CLI barfed before it could
+                // emit its envelope. Include both stdout and stderr so
+                // the user has enough to diagnose (missing auth, bad
+                // flag, killed by signal, etc).
+                Err(format!(
+                    "Claude CLI exited {} (unparseable output). \
+                     stdout: {} ;; stderr: {} ;; parse: {parse_err}",
+                    output.status,
+                    stdout.trim(),
+                    stderr.trim(),
+                ))
+            }
+        }
     }
 
     fn stream(&self, req: AiRequest) -> BoxStream<'static, Result<String, String>> {
