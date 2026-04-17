@@ -54,9 +54,11 @@ const CTX_SIZE: u32 = 4096;
 /// pointer to the backend). We saw this as a SIGABRT when closing the
 /// app during Phase 5b. Ordering here guarantees clean teardown:
 ///
-///     chat_template  (may reference the model)
-///  -> model          (holds internal ref to backend)
-///  -> backend        (freed last)
+/// ```text
+/// chat_template  (may reference the model)
+/// -> model       (holds internal ref to backend)
+/// -> backend     (freed last)
+/// ```
 ///
 /// Non-Llama fields live at the end because their drop order is
 /// irrelevant.
