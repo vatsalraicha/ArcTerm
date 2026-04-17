@@ -191,7 +191,14 @@ async function boot(mounts: Mounts): Promise<void> {
   // insert + PTY send). Empty-command behavior is preserved here: bare Enter
   // pushes a \r to the shell so it still feels responsive.
   const submitCommand = (active: Session, command: string) => {
-    active.terminal.writeBlockStart(command);
+    // Header pill carries cwd + branch, NOT the command — zle's echo
+    // of the command becomes the visible "command line" so we don't
+    // render it ourselves. Prettify cwd for display only; the literal
+    // path in session state is unchanged.
+    const prettyCwd = active.state.cwd
+      ? prettifyCwd(active.state.cwd, home)
+      : null;
+    active.terminal.writeBlockStart(prettyCwd, active.state.branch);
     manager.markCommandStart(active.id, command, null);
     const cwd = active.state.cwd;
     invoke<number>("history_insert", {

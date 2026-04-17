@@ -70,8 +70,18 @@ export interface TerminalHandle {
   onCommandEnd: (cb: (exitCode: number) => void) => void;
   /** Current known cwd, or null until the shell reports one. */
   getCwd: () => string | null;
-  /** Insert a visual block-start separator into the terminal output. */
-  writeBlockStart: (command: string) => void;
+  /**
+   * Insert a top-of-block header into the terminal output: a dim cwd +
+   * optional git branch pill. Does NOT render the command itself —
+   * zsh's line editor (zle) echoes the command back to the PTY as it
+   * reads our submission, and that echo BECOMES the visible command
+   * line. Avoids the duplicate-rendering problem that the previous
+   * approach (header + conceal-via-color) ran into.
+   *
+   * Pass null for cwd if the shell hasn't reported one yet (we'll show
+   * a `~` placeholder). branch may be empty for non-repo dirs.
+   */
+  writeBlockStart: (cwd: string | null, branch: string) => void;
   /** Insert a visual block-end separator with exit code + duration.
    *  Returns the text captured between block-start and block-end — this is
    *  the command's output, which the AI explain flow feeds back to Claude
@@ -282,13 +292,16 @@ export async function setupTerminal(
     onBranchChange: (cb) => branchListeners.add(cb),
     onCommandEnd: (cb) => commandEndListeners.add(cb),
     getCwd: () => currentCwd,
-    writeBlockStart: (command: string) => {
-      writeBlockStart(term, command);
-      // Record one line past where we just wrote, so output capture starts
-      // AFTER our header and concealed-echo lines. The extra +2 skips the
-      // "\r\n" we wrote after the header plus the zle echo line.
+    writeBlockStart: (cwd: string | null, branch: string) => {
+      writeBlockStart(term, cwd, branch);
+      // Record where we just left the cursor so writeBlockEnd can
+      // capture from this point as "command output". With the new
+      // architecture, the first line(s) after this point are zle's
+      // echo of the command — that's part of the user-facing block,
+      // and including it in the captured output (for AI explain) is
+      // useful context.
       const buf = term.buffer.active;
-      blockStartAbs = buf.baseY + buf.cursorY + 1;
+      blockStartAbs = buf.baseY + buf.cursorY;
     },
     writeBlockEnd: (exitCode, durationMs) => {
       // Capture BEFORE writing the footer so our separator lines don't
@@ -363,14 +376,31 @@ function captureBufferRange(
  * runs, the user sees nothing for the next output; they can type `\e[0m`
  * (echo) to recover — but this is vanishingly unlikely in practice.
  */
-function writeBlockStart(term: Terminal, command: string): void {
-  const sigil = "\x1b[38;2;79;195;247m❯\x1b[0m"; // accent blue
-  const cmdLine = `\x1b[1;97m${command}\x1b[0m`; // bold white
-  // Conceal-via-color: set fg to the terminal bg (#1a1a2e). We use 24-bit
-  // truecolor SGR so it matches regardless of palette quirks. Reset comes
-  // from the shell's preexec hook (OSC 133;C + \e[0m in arcterm.zsh).
-  const concealFg = "\x1b[38;2;26;26;46m";
-  term.write(`\r\n${sigil} ${cmdLine}\r\n${concealFg}`);
+/**
+ * Top-of-block header: a dim cwd + branch pill. Renders a single line
+ * like `📁 ~/Code  ⎇ main`. The command itself is NOT rendered — zle
+ * will echo it on the next line(s) as it reads our submission, and
+ * that echo becomes the visible command. Eliminates the
+ * duplicate-rendering problem at its source.
+ */
+function writeBlockStart(
+  term: Terminal,
+  cwd: string | null,
+  branch: string,
+): void {
+  const theme = term.options.theme ?? {};
+  const accent = String(theme.cursor ?? "#4fc3f7");
+  const accentSgr = hexToFgSgr(accent);
+
+  // Dim attribute for the whole pill — keeps it visible but quieter
+  // than command output, consistent with Warp's "subtle metadata pill"
+  // pattern. Folder glyph is a graceful unicode degrade for terminals
+  // that don't render the emoji.
+  const cwdText = cwd ?? "~";
+  const branchPart = branch
+    ? `  \x1b[2m${accentSgr}⎇ ${branch}\x1b[0m`
+    : "";
+  term.write(`\x1b[2m📁 ${cwdText}\x1b[0m${branchPart}\r\n`);
 }
 
 /**
@@ -383,6 +413,9 @@ function writeBlockEnd(
   exitCode: number | null,
   durationMs: number | null,
 ): void {
+  // Status indicators stay theme-independent (their meaning is
+  // inherently colored): green check, red cross. Use desaturated
+  // versions so they don't punch out of either palette.
   const status =
     exitCode === null
       ? ""
@@ -393,9 +426,47 @@ function writeBlockEnd(
     durationMs === null
       ? ""
       : `\x1b[2m${formatDuration(durationMs)}\x1b[0m`;
-  const line = "\x1b[2m" + "─".repeat(Math.max(term.cols - 12, 10)) + "\x1b[0m";
+  // Separator: thin dim line in theme-foreground color. The dim SGR
+  // (\x1b[2m) plus the explicit fg gives a subtle weight that reads
+  // correctly on both dark and light backgrounds — a hardcoded gray
+  // would be wrong against a light bg.
+  const theme = term.options.theme ?? {};
+  const lineFg = hexToFgSgr(String(theme.foreground ?? "#e0e0e0"));
+  const line = `\x1b[2m${lineFg}` + "─".repeat(Math.max(term.cols - 12, 10)) + "\x1b[0m";
   const suffix = [status, dur].filter(Boolean).join(" ");
-  term.write(`\r\n${line}${suffix ? " " + suffix : ""}\r\n`);
+  // No leading \r\n: zle's echo + command output naturally end on a
+  // newline, so the cursor is already at column 1 of a fresh line by
+  // the time we get here. Adding another \r\n created a blank line
+  // between the output and the separator that the user flagged as
+  // unnecessary "room to breathe."
+  term.write(`${line}${suffix ? " " + suffix : ""}\r\n`);
+}
+
+/**
+ * Convert a CSS hex color (#rrggbb or #rgb) into a 24-bit-truecolor
+ * foreground SGR escape. xterm understands `\x1b[38;2;R;G;Bm`
+ * universally — works in every renderer (canvas, DOM, WebGL).
+ *
+ * Falls back to a sane default if the input isn't parseable so a typo
+ * in a theme can never produce empty output.
+ */
+function hexToFgSgr(color: string): string {
+  let hex = color.trim();
+  if (hex.startsWith("#")) hex = hex.slice(1);
+  // Expand #abc → #aabbcc.
+  if (hex.length === 3) {
+    hex = hex.split("").map((c) => c + c).join("");
+  }
+  if (hex.length !== 6) {
+    return "\x1b[39m"; // default fg
+  }
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+    return "\x1b[39m";
+  }
+  return `\x1b[38;2;${r};${g};${b}m`;
 }
 
 function formatDuration(ms: number): string {

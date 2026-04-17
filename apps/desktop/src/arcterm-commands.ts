@@ -98,8 +98,13 @@ export async function runInternalCommand(
     session: Session,
 ): Promise<void> {
     const trimmed = raw.trim();
-    // Echo the command as a block header so the user sees what ran.
-    session.terminal.writeBlockStart(trimmed);
+    // Header pill (cwd + branch). For internal commands there's no
+    // shell + no zle echo, so we ALSO write the command text manually
+    // — otherwise the user would see "this output came from… what?".
+    // For shell commands main.ts skips this manual write because zle
+    // echoes the command for free.
+    session.terminal.writeBlockStart(session.state.cwd, session.state.branch);
+    session.terminal.writeRaw(`\x1b[1m${trimmed}\x1b[0m\r\n`);
 
     // Parse: `/arcterm-<name> [arg1] [arg2] ...`
     const parts = trimmed.slice(1).split(/\s+/);
