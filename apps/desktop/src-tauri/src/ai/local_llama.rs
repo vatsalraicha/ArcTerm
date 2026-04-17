@@ -251,17 +251,21 @@ fn run_inference(
 /// that compensate for small-model + aggressive-quantization failure modes.
 ///
 /// Lessons from testing IQ2_M on Phase 5b:
-///   - The compact context block (no recent-commands history) helps a
-///     lot: the model was treating history entries as exemplars and
-///     returning pattern-matched one-word answers (`history` instead of
-///     an awk-pipe chain).
-///   - Positive-phrased instructions beat negation lists. "Respond with
-///     exactly one command on one line" works; "no explanation, no
-///     markdown fences" causes the model to fixate on fences and emit
-///     empty ```` ``` ```` answers.
-///   - Examples in the prompt help (one-shot), but add token cost. We
-///     include one tiny example; if needed for future tuning, this is
-///     the dial to adjust.
+///   - Compact context (no recent-commands history): the model treated
+///     history entries as exemplars and returned pattern-matched one-word
+///     answers (`history` instead of an awk-pipe chain).
+///   - Positive-phrased instructions: negations ("no explanation, no
+///     markdown fences") made the model fixate on fences and emit empty
+///     ``` blocks.
+///   - **No in-context examples.** Intuitive but wrong: at 2-bit
+///     quantization the model fails to complete the User/Assistant
+///     pattern and echoes the user line back instead. Small quants
+///     pattern-match on surface structure and IQ2 gets it inverted.
+///     Zero-shot is strictly better here.
+///   - Put the command request on the last line with nothing after it —
+///     no trailing "Request:" prefix, no "User:" etc. The tighter the
+///     distance between the last instruction word and the `model` turn
+///     marker, the less room the model has to drift.
 fn build_prompt(req: &AiRequest) -> String {
     let mut user = String::new();
     if let Some(ctx) = &req.context {
@@ -271,12 +275,8 @@ fn build_prompt(req: &AiRequest) -> String {
     match req.mode {
         AiMode::Command => {
             user.push_str(
-                "Respond with exactly one shell command for zsh on macOS. \
-                 Write only the command on a single line.\n\n\
-                 Example:\n\
-                 User: show the largest files in this directory\n\
-                 Assistant: du -sh * | sort -hr | head\n\n\
-                 User: ",
+                "Write one zsh command on macOS that accomplishes the \
+                 following task. Output only the command.\n\nTask: ",
             );
         }
         AiMode::Explain => {
