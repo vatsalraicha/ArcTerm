@@ -23,6 +23,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
+use crate::shell_hooks;
+
 /// Event names. Mirrored in apps/desktop/src/terminal.ts — keep in sync.
 const EVENT_DATA: &str = "pty://data";
 const EVENT_EXIT: &str = "pty://exit";
@@ -56,18 +58,22 @@ struct ExitPayload {
     code: Option<i32>,
 }
 
-#[derive(Default)]
 pub struct PtyManager {
     // Arc + Mutex so reader threads can hold a reference while IPC handlers
     // mutate the map. Inner Arc<PtyEntry> lets a write/resize call grab a
     // single entry without blocking the whole map.
     entries: Arc<Mutex<HashMap<String, Arc<PtyEntry>>>>,
+    /// Paths to shell integration files, if installation succeeded. `None`
+    /// means "spawn a bare shell without our hooks" — everything still works,
+    /// just without the ArcTerm-managed prompt/cwd reporting.
+    shell_paths: Option<shell_hooks::Paths>,
 }
 
 impl PtyManager {
-    pub fn new() -> Self {
+    pub fn new(shell_paths: Option<shell_hooks::Paths>) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
+            shell_paths,
         }
     }
 
@@ -101,6 +107,19 @@ impl PtyManager {
         // can use. xterm-256color is the broadest safe choice for xterm.js.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+
+        // Shell integration: point zsh at our ZDOTDIR so our rc files chain-
+        // load the user's .zshrc and then install ArcTerm's prompt/cwd hooks.
+        // Only wire this for zsh — bash/fish will get their own hooks later.
+        if let Some(paths) = &self.shell_paths {
+            if shell.ends_with("zsh") {
+                cmd.env("ZDOTDIR", &paths.zdotdir);
+                cmd.env("ARCTERM_INTEGRATION_DIR", &paths.integration_dir);
+                // Marker env var so scripts can detect "running inside ArcTerm"
+                // without having to string-match TERM_PROGRAM.
+                cmd.env("ARCTERM_SESSION", "1");
+            }
+        }
 
         let child = pair
             .slave

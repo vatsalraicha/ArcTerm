@@ -10,6 +10,13 @@
  * The backend pushes shell output via the Tauri event "pty://data" with
  * payload { id, data }. We subscribe once and route by id so multi-session
  * support (Phase 4) only needs another spawn + a session->terminal map.
+ *
+ * Phase 2 additions:
+ *   - Expose a `send(text)` handle so the custom input editor can push
+ *     commands into the PTY without the rest of the app having to know
+ *     about Tauri IPC.
+ *   - Register an OSC 7 handler that fires `onCwdChange` when the shell
+ *     announces a working-directory change (via arcterm.zsh's chpwd hook).
  */
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -36,7 +43,18 @@ interface PtyExitPayload {
   code: number | null;
 }
 
-export async function setupTerminal(host: HTMLElement): Promise<void> {
+export interface TerminalHandle {
+  /** Write raw text to the PTY (e.g. a command line followed by \r). */
+  send: (data: string) => Promise<void>;
+  /** Subscribe to cwd updates emitted via OSC 7 from the shell. */
+  onCwdChange: (cb: (cwd: string) => void) => void;
+  /** Current known cwd, or null until the shell reports one. */
+  getCwd: () => string | null;
+  /** Move keyboard focus into xterm (for TUI programs that need direct keys). */
+  focus: () => void;
+}
+
+export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> {
   const term = new Terminal({
     fontFamily: '"JetBrains Mono", Menlo, Monaco, monospace',
     fontSize: 14,
@@ -78,6 +96,20 @@ export async function setupTerminal(host: HTMLElement): Promise<void> {
   fit.fit();
   requestAnimationFrame(() => fit.fit());
 
+  // --- OSC 7 handler: shell reports cwd ---------------------------------
+  // Format the arcterm.zsh script emits: `file://host/absolute/path`.
+  // xterm's registerOscHandler returns true to mark the sequence consumed.
+  let currentCwd: string | null = null;
+  const cwdListeners = new Set<(cwd: string) => void>();
+  term.parser.registerOscHandler(7, (uri: string) => {
+    const cwd = parseOsc7(uri);
+    if (cwd && cwd !== currentCwd) {
+      currentCwd = cwd;
+      for (const cb of cwdListeners) cb(cwd);
+    }
+    return true;
+  });
+
   const ptyId = await invoke<string>("pty_spawn", {
     cols: term.cols,
     rows: term.rows,
@@ -102,8 +134,10 @@ export async function setupTerminal(host: HTMLElement): Promise<void> {
     },
   );
 
-  // Terminal -> PTY. xterm's onData fires for both keystrokes and pasted
-  // content; we forward verbatim and let the shell handle line discipline.
+  // Terminal -> PTY. xterm's onData still fires when the user clicks into
+  // the output area and types — useful for TUI programs (vim, htop) where
+  // the custom editor doesn't apply. The primary input path in Phase 2 is
+  // the InputEditor calling `handle.send()` below.
   term.onData((data) => {
     invoke("pty_write", { id: ptyId, data }).catch((err) =>
       console.error("pty_write failed", err),
@@ -137,7 +171,39 @@ export async function setupTerminal(host: HTMLElement): Promise<void> {
     invoke("pty_kill", { id: ptyId }).catch(() => {});
   });
 
-  term.focus();
+  // Caller decides who holds focus — typically the InputEditor takes it.
+  return {
+    send: (data: string) => invoke("pty_write", { id: ptyId, data }),
+    onCwdChange: (cb) => {
+      cwdListeners.add(cb);
+      // Replay the current cwd so late subscribers don't miss it.
+      if (currentCwd) cb(currentCwd);
+    },
+    getCwd: () => currentCwd,
+    focus: () => term.focus(),
+  };
+}
+
+/**
+ * Parse an OSC 7 payload. Real-world examples:
+ *   "file://mymac.local/Users/vr/Code/Apple/ArcTerm"
+ *   "file:///Users/vr"     (empty host — also valid)
+ * We ignore the host and return just the decoded path.
+ */
+function parseOsc7(uri: string): string | null {
+  if (!uri.startsWith("file://")) return null;
+  // Skip scheme. Then skip past the next "/" to drop the host segment.
+  const rest = uri.slice("file://".length);
+  const pathStart = rest.indexOf("/");
+  if (pathStart === -1) return null;
+  const encodedPath = rest.slice(pathStart);
+  try {
+    return decodeURIComponent(encodedPath);
+  } catch {
+    // Malformed percent-encoding — return the raw value rather than nothing
+    // so the UI can still show *something* sensible.
+    return encodedPath;
+  }
 }
 
 /**

@@ -1,0 +1,103 @@
+/*
+ * Phase 2 input editor styles.
+ *
+ * Layout:
+ *   #input-dock    — container pinned below #terminal-frame (flex fixed-height)
+ *     #prompt-bar  — cwd display above the input
+ *     #input-area  — sigil + editable area in a single row
+ */
+
+#input-dock {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px 12px;
+  /* Ensure the dock stays above any accidental xterm overflow. */
+  position: relative;
+  z-index: 1;
+}
+
+#prompt-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  user-select: text;
+  -webkit-user-select: text;
+  /* Ellipsis when the path is too long rather than wrapping and pushing the
+     editor down. A full tooltip/expansion arrives with Phase 7 polish. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prompt-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.prompt-cwd {
+  font-family: var(--font-mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#input-area {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  /* A bit of vertical padding so descenders on multi-line input don't kiss
+     the dock's bottom border. */
+  padding: 2px 0;
+}
+
+.prompt-sigil {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  /* Align with the first editor line when input spans multiple lines. */
+  padding-top: 1px;
+  flex: 0 0 auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#input-editor-host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.arcterm-input-editor {
+  width: 100%;
+  min-height: 1.5em;
+  max-height: 30vh;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  outline: none;
+  /* pre-wrap: preserve spaces/newlines as typed but wrap long lines so the
+     editor never forces horizontal scroll. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+  caret-color: var(--accent);
+}
+
+/* Placeholder-style hint when the editor is empty. */
+.arcterm-input-editor:empty::before {
+  content: "type a command";
+  color: var(--muted);
+  opacity: 0.5;
+  pointer-events: none;
+}

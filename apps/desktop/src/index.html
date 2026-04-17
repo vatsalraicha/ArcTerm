@@ -7,22 +7,28 @@
           content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost" />
     <title>ArcTerm</title>
     <link rel="stylesheet" href="./styles/main.css" />
+    <link rel="stylesheet" href="./styles/input-editor.css" />
   </head>
   <body>
     <!--
-      Phase 1 layout is intentionally minimal:
-        - #terminal hosts xterm.js (output + cursor)
-      Sidebar, input editor, and AI panel arrive in later phases.
+      Phase 2 layout:
+        - #terminal-frame hosts xterm (scrollable shell output)
+        - #input-dock holds the prompt bar + custom input editor, pinned
+          below the terminal. This replaces the shell's own prompt.
     -->
     <main id="app">
-      <!--
-        #terminal-frame owns the window cushion (padding). Keeping the
-        xterm host (#terminal) padding-free means its content-box equals its
-        border-box, so ResizeObserver fires correctly and fit() sees the
-        real drawable area every time the window reflows.
-      -->
       <div id="terminal-frame">
         <div id="terminal"></div>
+      </div>
+      <div id="input-dock">
+        <div id="prompt-bar">
+          <span class="prompt-icon" aria-hidden="true">📁</span>
+          <span id="prompt-cwd" class="prompt-cwd">~</span>
+        </div>
+        <div id="input-area">
+          <span class="prompt-sigil" aria-hidden="true">❯</span>
+          <div id="input-editor-host"></div>
+        </div>
       </div>
     </main>
     <script type="module" src="./main.ts"></script>
