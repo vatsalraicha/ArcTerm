@@ -130,6 +130,18 @@ impl PtyManager {
             match shell_name {
                 "zsh" => {
                     cmd.env("ZDOTDIR", &paths.zdotdir);
+                    // -l = login shell. Matters when ArcTerm is launched
+                    // from Finder (or any non-Terminal launcher) because
+                    // macOS gives such processes a minimal launchd PATH
+                    // (no /opt/homebrew/bin). .zprofile is the
+                    // conventional place users put `eval "$(brew
+                    // shellenv)"` and similar PATH setup, and non-login
+                    // zsh skips it entirely — so brew is missing when
+                    // .zshrc runs. -l runs .zprofile first.
+                    //
+                    // Terminal.app always passes -l for the same reason.
+                    // We match its convention.
+                    cmd.arg("-l");
                 }
                 "bash" => {
                     // --rcfile replaces the default rc lookup (~/.bashrc).
@@ -138,8 +150,15 @@ impl PtyManager {
                     // in-place (returns ()), so we call per-arg.
                     cmd.arg("--rcfile");
                     cmd.arg(&paths.bash_rcfile);
+                    // Same launchd-PATH problem as zsh; bash reads
+                    // .bash_profile / .profile in login mode which is
+                    // where brew shellenv typically lives.
+                    cmd.arg("-l");
                 }
                 "fish" => {
+                    // -l = login shell for fish too (runs config.fish's
+                    // login-specific code paths, important for PATH).
+                    cmd.arg("-l");
                     // -C "<cmd>" runs after config.fish. Source our hook
                     // file as a post-init step so user config wins the
                     // first pass but our prompt suppression wins the last.

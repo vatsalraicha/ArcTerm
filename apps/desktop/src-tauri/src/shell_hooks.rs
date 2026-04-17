@@ -31,6 +31,8 @@ const ARCTERM_BASH: &str = include_str!("../../../../shell-integration/arcterm.b
 const ARCTERM_FISH: &str = include_str!("../../../../shell-integration/arcterm.fish");
 const ZDOTDIR_ZSHENV: &str = include_str!("../../../../shell-integration/zdotdir/.zshenv");
 const ZDOTDIR_ZSHRC: &str = include_str!("../../../../shell-integration/zdotdir/.zshrc");
+const ZDOTDIR_ZPROFILE: &str = include_str!("../../../../shell-integration/zdotdir/.zprofile");
+const ZDOTDIR_ZLOGIN: &str = include_str!("../../../../shell-integration/zdotdir/.zlogin");
 
 /// Chain bashrc: sources the user's ~/.bashrc (if present) and then our
 /// arcterm.bash hooks. Used with `bash --rcfile <this>` on PTY spawn.
@@ -91,6 +93,14 @@ pub fn install() -> Result<Paths, String> {
     write_file(&integration_dir.join("arcterm.zsh"), ARCTERM_ZSH)?;
     write_file(&zdotdir.join(".zshenv"), ZDOTDIR_ZSHENV)?;
     write_file(&zdotdir.join(".zshrc"), ZDOTDIR_ZSHRC)?;
+    // .zprofile + .zlogin are only consumed when zsh runs as a login
+    // shell. We spawn zsh with -l specifically so that PATH-setting
+    // lines in the user's ~/.zprofile (e.g. `eval "$(brew shellenv)"`)
+    // run before .zshrc tries to reference brew. Without this, apps
+    // launched from Finder (which get launchd's minimal PATH) fail
+    // to find brew in .zshrc.
+    write_file(&zdotdir.join(".zprofile"), ZDOTDIR_ZPROFILE)?;
+    write_file(&zdotdir.join(".zlogin"), ZDOTDIR_ZLOGIN)?;
 
     // bash
     write_file(&integration_dir.join("arcterm.bash"), ARCTERM_BASH)?;
