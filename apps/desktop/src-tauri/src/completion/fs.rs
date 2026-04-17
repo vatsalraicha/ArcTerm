@@ -70,8 +70,16 @@ pub fn complete(text: &str, cursor_pos: usize, cwd: &Path) -> CompletionResult {
     let (token_start, token) = extract_token(text, cursor_pos);
     let (dir_part, base) = split_dir_base(token);
 
-    let dir = resolve_dir(&dir_part, cwd);
-    let mut completions = match list_dir(&dir, base) {
+    // The user-typed dir_part / base may contain backslash-escapes (we
+    // INSERT them on completion, and shell convention has people writing
+    // them by hand too). Unescape before consulting the filesystem.
+    // We keep the original dir_part around for replacement assembly so
+    // the user's chosen style (escapes vs none) is preserved.
+    let dir_for_fs = shell_unescape(&dir_part);
+    let base_for_fs = shell_unescape(base);
+
+    let dir = resolve_dir(&dir_for_fs, cwd);
+    let mut completions = match list_dir(&dir, &base_for_fs) {
         Ok(c) => c,
         Err(_) => Vec::new(),
     };
@@ -93,11 +101,22 @@ pub fn complete(text: &str, cursor_pos: usize, cwd: &Path) -> CompletionResult {
         }
     });
 
-    // Each completion's replacement is the full dir + matched entry. We
-    // build it from the raw `dir_part` (what the user typed) to preserve
-    // their style (~/foo vs /Users/.../foo vs relative).
+    // Each completion's replacement is the full dir + matched entry,
+    // shell-escaped so paths with spaces / parens / glob chars survive
+    // the trip through zsh's word splitting.
+    //
+    // The `label` field stays as the clean human name ("ABAL PaySlips/")
+    // because the dropdown UI shows it directly to the user. Only
+    // `replacement` (what gets spliced into the editor and ultimately
+    // submitted to the shell) needs the escapes.
+    //
+    // We escape the COMBINED string rather than just the entry name so
+    // any spaces in dir_part get escaped too. Tilde (`~`) is preserved
+    // unescaped because shells perform tilde expansion before quote
+    // processing — escaping it would defeat ~/Code becoming /Users/.../Code.
     for c in &mut completions {
-        c.replacement = join_preserving_style(&dir_part, &c.replacement);
+        let combined = join_preserving_style(&dir_part, &c.replacement);
+        c.replacement = shell_escape(&combined);
     }
 
     CompletionResult {
@@ -107,15 +126,36 @@ pub fn complete(text: &str, cursor_pos: usize, cwd: &Path) -> CompletionResult {
     }
 }
 
-/// Find the token under the cursor. A "token" here is a run of non-whitespace
-/// bytes ending at cursor_pos — we don't try to be fancy about shell quoting
-/// (the Phase 7 full-shell-lexer can handle that later).
+/// Find the token under the cursor. A "token" here is a run of non-
+/// whitespace bytes ending at cursor_pos, with one nuance: a backslash
+/// immediately preceding a whitespace byte ESCAPES it — common in shell
+/// paths-with-spaces (`ABAL\ PaySlips/`). Without this, hitting Tab to
+/// extend an already-completed escaped path would split the token at
+/// the escaped space and try to complete the wrong fragment.
 fn extract_token(text: &str, cursor_pos: usize) -> (usize, &str) {
     let bytes = text.as_bytes();
     let mut start = cursor_pos;
     while start > 0 {
         let ch = bytes[start - 1];
-        if ch == b' ' || ch == b'\t' || ch == b'\n' {
+        let is_ws = ch == b' ' || ch == b'\t' || ch == b'\n';
+        if is_ws {
+            // Is this whitespace escaped? Check the byte BEFORE it for
+            // a single (unescaped) backslash. Counts run-length so
+            // `\\\ ` (escaped backslash + escaped space) is handled
+            // correctly: the space ISN'T escaped because the backslash
+            // before it is itself escaped.
+            let mut bs = 0usize;
+            let mut i = start - 1;
+            while i > 0 && bytes[i - 1] == b'\\' {
+                bs += 1;
+                i -= 1;
+            }
+            if bs % 2 == 1 {
+                // Odd number of backslashes → the trailing one escapes
+                // this whitespace; keep walking past both.
+                start -= 2;
+                continue;
+            }
             break;
         }
         start -= 1;
@@ -127,6 +167,27 @@ fn extract_token(text: &str, cursor_pos: usize) -> (usize, &str) {
         start += 1;
     }
     (start, &text[start..cursor_pos])
+}
+
+/// Inverse of `shell_escape`: strip backslash escapes so a token the user
+/// typed (or that we previously inserted with escapes) maps to a real
+/// filesystem path. Used before resolve_dir / read_dir filter so
+/// `My\ Folder/` becomes `My Folder/`.
+fn shell_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // The next char is taken literally. If there's no next char
+            // (trailing backslash), the backslash is dropped.
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Split a token like `path/to/fi` into (`path/to`, `fi`). For a bare token
@@ -244,6 +305,38 @@ fn is_executable(_meta: &fs::Metadata) -> bool {
 /// Combine the user's original dir string with the matched entry name,
 /// preserving their style. If the user typed `~/Code/` we keep the `~`
 /// rather than rewriting to an absolute path.
+/// Backslash-escape any character that zsh / bash / fish treat as a word
+/// boundary or special token. Used on FS-completion replacements before
+/// they hit the editor so submitting them to the shell preserves the
+/// path as a single argument.
+///
+/// Notable absences from the escape set:
+///   `~`  — shells perform tilde expansion BEFORE quote/escape processing.
+///          Escaping it would defeat `~/Code` → `/Users/<u>/Code`.
+///   `/`  — never special.
+///   `.`, `-`, `_`, `+`, `=`, alphanumerics — always literal.
+///
+/// We use backslash escaping (not single-quote wrapping) for two reasons:
+///   1. Wrapping the whole string in `'...'` would break tilde expansion
+///      because tilde at word-start only expands UNQUOTED.
+///   2. The escaped form looks more like what users see in shell completion
+///      output (`ABAL\ PaySlips/`) — they recognize it.
+fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(
+            c,
+            ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '*' | '?'
+            | '[' | ']' | '(' | ')' | '{' | '}' | '$' | '`'
+            | '|' | '&' | ';' | '<' | '>' | '#' | '!'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn join_preserving_style(dir_part: &str, entry_replacement: &str) -> String {
     if dir_part.is_empty() {
         entry_replacement.to_string()
