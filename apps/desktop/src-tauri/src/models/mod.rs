@@ -74,15 +74,17 @@ impl ModelSpec {
 // differ — always copy the exact filename shown on the HuggingFace "Files"
 // tab.
 pub const REGISTRY: &[ModelSpec] = &[
+    // --- Gemma 4 E2B (smaller, ~2.3B active) ------------------------------
+    // E2B is the tightest Gemma 4. Good for laptops with 8 GB unified RAM
+    // or users who want fast load. Quality is visibly behind E4B on
+    // multi-step tool use (as we found in Phase 5b testing).
     ModelSpec {
         id: "gemma-4-e2b-it-q4km",
         display_name: "Gemma 4 E2B (Q4_K_M)",
-        // bartowski's quant set — covers more quants than google/ggml-org
-        // repos and is the de-facto standard community source.
         url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/google_gemma-4-E2B-it-Q4_K_M.gguf",
         filename: "google_gemma-4-E2B-it-Q4_K_M.gguf",
-        sha256: "", // TODO: pin before tagging a release
-        size_bytes: 3_460_000_000, // 3.46 GB approx
+        sha256: "",
+        size_bytes: 3_460_000_000,
         parameters: "2.3B active / 5.1B total",
         quantization: "Q4_K_M",
         license: "Apache-2.0",
@@ -96,6 +98,46 @@ pub const REGISTRY: &[ModelSpec] = &[
         size_bytes: 2_620_000_000,
         parameters: "2.3B active / 5.1B total",
         quantization: "IQ2_M",
+        license: "Apache-2.0",
+    },
+
+    // --- Gemma 4 E4B (bigger, ~4B active) ---------------------------------
+    // E4B reasons noticeably better than E2B and is what we recommend for
+    // real tool-use. Needs ~6 GB free RAM during inference on top of the
+    // on-disk size. `q4km` is the balanced choice; `iq2m` trades quality
+    // for a smaller footprint when disk space is tight; `q8` is the
+    // highest-fidelity quant worth shipping (BF16 is too big).
+    ModelSpec {
+        id: "gemma-4-e4b-it-q4km",
+        display_name: "Gemma 4 E4B (Q4_K_M)",
+        url: "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/google_gemma-4-E4B-it-Q4_K_M.gguf",
+        filename: "google_gemma-4-E4B-it-Q4_K_M.gguf",
+        sha256: "",
+        size_bytes: 5_410_000_000,
+        parameters: "4B active / 7.5B total",
+        quantization: "Q4_K_M",
+        license: "Apache-2.0",
+    },
+    ModelSpec {
+        id: "gemma-4-e4b-it-iq2m",
+        display_name: "Gemma 4 E4B (IQ2_M, tight)",
+        url: "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/google_gemma-4-E4B-it-IQ2_M.gguf",
+        filename: "google_gemma-4-E4B-it-IQ2_M.gguf",
+        sha256: "",
+        size_bytes: 3_960_000_000,
+        parameters: "4B active / 7.5B total",
+        quantization: "IQ2_M",
+        license: "Apache-2.0",
+    },
+    ModelSpec {
+        id: "gemma-4-e4b-it-q8",
+        display_name: "Gemma 4 E4B (Q8_0, high quality)",
+        url: "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/google_gemma-4-E4B-it-Q8_0.gguf",
+        filename: "google_gemma-4-E4B-it-Q8_0.gguf",
+        sha256: "",
+        size_bytes: 8_030_000_000,
+        parameters: "4B active / 7.5B total",
+        quantization: "Q8_0",
         license: "Apache-2.0",
     },
 ];

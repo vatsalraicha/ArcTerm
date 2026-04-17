@@ -247,43 +247,32 @@ fn run_inference(
     }
 }
 
-/// Wrap the request in Gemma 4's chat template + apply prompt tweaks
-/// that compensate for small-model + aggressive-quantization failure modes.
-///
-/// Lessons from testing IQ2_M on Phase 5b:
-///   - Compact context (no recent-commands history): the model treated
-///     history entries as exemplars and returned pattern-matched one-word
-///     answers (`history` instead of an awk-pipe chain).
-///   - Positive-phrased instructions: negations ("no explanation, no
-///     markdown fences") made the model fixate on fences and emit empty
-///     ``` blocks.
-///   - **No in-context examples.** Intuitive but wrong: at 2-bit
-///     quantization the model fails to complete the User/Assistant
-///     pattern and echoes the user line back instead. Small quants
-///     pattern-match on surface structure and IQ2 gets it inverted.
-///     Zero-shot is strictly better here.
-///   - Put the command request on the last line with nothing after it —
-///     no trailing "Request:" prefix, no "User:" etc. The tighter the
-///     distance between the last instruction word and the `model` turn
-///     marker, the less room the model has to drift.
+/// Wrap the request in Gemma 4's chat template. Reverted to the original
+/// Phase 5b prompt shape after the "tuned" variants made things worse.
+/// Keeping `to_compact_prompt_block` around in context.rs as a future
+/// dial, but not using it: the full context block works as well as
+/// compact in practice and gives Claude/Gemma the same grounding.
 fn build_prompt(req: &AiRequest) -> String {
     let mut user = String::new();
     if let Some(ctx) = &req.context {
-        user.push_str(&ctx.to_compact_prompt_block());
+        user.push_str(&ctx.to_prompt_block());
         user.push('\n');
     }
     match req.mode {
         AiMode::Command => {
             user.push_str(
-                "Write one zsh command on macOS that accomplishes the \
-                 following task. Output only the command.\n\nTask: ",
+                "Convert the following request into a single shell command \
+                 for zsh on macOS. Output ONLY the command, no explanation, \
+                 no markdown fences.\n\n",
             );
+            user.push_str("Request: ");
         }
         AiMode::Explain => {
             user.push_str(
-                "Explain the command or error above in 2-4 plain sentences. \
-                 If there is a fix, end with a markdown code block \
-                 containing a single shell command.\n\n",
+                "Explain the command or error above. Give a short plain \
+                 explanation (2-4 sentences) and then, if applicable, a \
+                 suggested fix as a one-line shell command on the last \
+                 line in a markdown code block.\n\n",
             );
         }
         AiMode::Chat => {}
