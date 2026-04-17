@@ -33,14 +33,25 @@ pub struct Settings {
     /// settings tree to a UI.
     #[serde(default)]
     pub ai: AiSettings,
+    /// UI theme. "dark" (default) or "light". Phase 7+ may add "system"
+    /// that tracks the OS appearance. Stored at the top level rather
+    /// than nested because it's user-facing and expected to show up
+    /// in the settings tree as a top-level toggle.
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             ai: AiSettings::default(),
+            theme: default_theme(),
         }
     }
+}
+
+fn default_theme() -> String {
+    "dark".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

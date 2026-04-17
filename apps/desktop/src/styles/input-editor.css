@@ -122,7 +122,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--accent);
-  background: rgba(79, 195, 247, 0.1);
+  background: var(--selection-bg);
   border-radius: 3px;
   padding: 1px 6px;
   margin-left: 4px;

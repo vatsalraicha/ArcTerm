@@ -32,6 +32,17 @@ import type { Session } from "./session-manager";
 export const INTERNAL_PREFIX = "/arcterm-";
 
 /**
+ * Global hook registered by main.ts at boot. The theme command needs to
+ * reach into SessionManager + flip a class on <html>, both of which live
+ * outside this module. Rather than threading those through every
+ * slash-command call site, main.ts stashes a handler here once.
+ */
+let themeApplier: ((theme: "dark" | "light") => void) | null = null;
+export function registerThemeApplier(fn: (theme: "dark" | "light") => void): void {
+    themeApplier = fn;
+}
+
+/**
  * True if this text should be handled internally rather than sent to the
  * shell. Editor's onSubmit checks this before the PTY send path.
  */
@@ -113,6 +124,9 @@ export async function runInternalCommand(
             case "arcterm-status":
                 await cmdStatus(session);
                 break;
+            case "arcterm-theme":
+                await cmdTheme(session, args);
+                break;
             default:
                 writeError(session, `Unknown command: ${name}`);
                 writeLine(
@@ -137,6 +151,7 @@ function writeHelp(session: Session): void {
         ["/arcterm-model [claude|local|auto]", "show or set AI backend"],
         ["/arcterm-models", "list available local models"],
         ["/arcterm-download <id>", "download a model from the registry"],
+        ["/arcterm-theme [dark|light]", "show or set UI theme"],
         ["/arcterm-status", "show current AI router state"],
     ];
     writeLine(session, "\x1b[1mArcTerm commands:\x1b[0m");
@@ -272,6 +287,32 @@ async function cmdDownload(session: Session, args: string[]): Promise<void> {
     } else {
         writeError(session, done.error ?? "download failed");
     }
+}
+
+async function cmdTheme(session: Session, args: string[]): Promise<void> {
+    const settings = await invoke<{ theme?: string }>("settings_get");
+    const current = settings.theme === "light" ? "light" : "dark";
+    if (args.length === 0) {
+        writeLine(
+            session,
+            `Current theme: \x1b[1;36m${current}\x1b[0m`,
+        );
+        writeLine(session, "Set with: /arcterm-theme <dark|light>");
+        return;
+    }
+    const next = args[0];
+    if (next !== "dark" && next !== "light") {
+        throw new Error(`Invalid theme '${next}'. Use one of: dark, light.`);
+    }
+    if (!themeApplier) {
+        throw new Error("theme applier not registered");
+    }
+    // Persist first, then apply. settings_set replaces the full Settings
+    // object so we have to round-trip: fetch, modify, save.
+    const full = await invoke<Record<string, unknown>>("settings_get");
+    await invoke("settings_set", { settings: { ...full, theme: next } });
+    themeApplier(next);
+    writeLine(session, `\x1b[32mTheme switched to \x1b[1m${next}\x1b[0m.`);
 }
 
 async function cmdStatus(session: Session): Promise<void> {

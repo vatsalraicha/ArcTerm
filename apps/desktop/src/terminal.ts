@@ -43,6 +43,8 @@ interface PtyExitPayload {
   code: number | null;
 }
 
+export type ThemeName = "dark" | "light";
+
 export interface TerminalHandle {
   /** Write raw text to the PTY (e.g. a command line followed by \r). */
   send: (data: string) => Promise<void>;
@@ -53,6 +55,13 @@ export interface TerminalHandle {
    * Supports ANSI escape sequences exactly the same way shell output does.
    */
   writeRaw: (data: string) => void;
+  /**
+   * Swap the xterm theme (bg/fg/cursor/selection/ANSI palette). Called
+   * when the user changes the app theme via /arcterm-theme; ArcTerm's
+   * chrome updates via a CSS class swap, but xterm manages its own
+   * canvas and needs an imperative update.
+   */
+  setTheme: (theme: ThemeName) => void;
   /** Subscribe to cwd updates emitted via OSC 7 from the shell. */
   onCwdChange: (cb: (cwd: string) => void) => void;
   /** Subscribe to git-branch updates from custom OSC 1337 ArcTermBranch. */
@@ -77,7 +86,33 @@ export interface TerminalHandle {
   sessionId: string;
 }
 
-export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> {
+/**
+ * xterm theme presets. Kept here (not in CSS) because xterm paints a
+ * canvas it owns — it can't read CSS variables directly. When the app
+ * theme changes, main.ts calls `handle.setTheme(name)` which pushes the
+ * matching preset into the live xterm instance.
+ */
+const XTERM_THEMES: Record<ThemeName, NonNullable<ConstructorParameters<typeof Terminal>[0]>["theme"]> = {
+  dark: {
+    background: "#1a1a2e",
+    foreground: "#e0e0e0",
+    cursor: "#4fc3f7",
+    cursorAccent: "#1a1a2e",
+    selectionBackground: "rgba(79, 195, 247, 0.3)",
+  },
+  light: {
+    background: "#f4f4f4",
+    foreground: "#1a1a1a",
+    cursor: "#1976d2",
+    cursorAccent: "#ffffff",
+    selectionBackground: "rgba(25, 118, 210, 0.25)",
+  },
+};
+
+export async function setupTerminal(
+  host: HTMLElement,
+  initialTheme: ThemeName = "dark",
+): Promise<TerminalHandle> {
   const term = new Terminal({
     fontFamily: '"JetBrains Mono", Menlo, Monaco, monospace',
     fontSize: 14,
@@ -85,13 +120,7 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
     cursorStyle: "bar",
     scrollback: 10_000,
     allowProposedApi: true,
-    theme: {
-      background: "#1a1a2e",
-      foreground: "#e0e0e0",
-      cursor: "#4fc3f7",
-      cursorAccent: "#1a1a2e",
-      selectionBackground: "rgba(79, 195, 247, 0.3)",
-    },
+    theme: XTERM_THEMES[initialTheme],
   });
 
   const fit = new FitAddon();
@@ -240,6 +269,11 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
   return {
     send: (data: string) => invoke("pty_write", { id: ptyId, data }),
     writeRaw: (data: string) => term.write(data),
+    setTheme: (name: ThemeName) => {
+      // xterm has an `options.theme` setter that triggers a repaint.
+      // Runtime swap; no renderer rebuild needed.
+      term.options.theme = XTERM_THEMES[name];
+    },
     onCwdChange: (cb) => {
       cwdListeners.add(cb);
       // Replay the current cwd so late subscribers don't miss it.

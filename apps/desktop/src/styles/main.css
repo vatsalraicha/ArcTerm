@@ -1,7 +1,13 @@
 /*
- * Phase 4 root layout.
- * Colors mirror the spec's dark palette so Phases 7+ can swap to
- * CSS-variable theming without re-writing component styles.
+ * Theme tokens.
+ *
+ * :root holds the DARK palette (app default). `.theme-light` on <html>
+ * overrides every variable. All UI components consume these vars only —
+ * never hardcode colors in component CSS — so theming is a class swap,
+ * not a rewrite.
+ *
+ * Non-color tokens (font, sidebar-width) live outside the theme-specific
+ * blocks so they stay constant across themes.
  */
 :root {
   --bg: #1a1a2e;
@@ -10,13 +16,51 @@
   --text: #e0e0e0;
   --muted: #8888a0;
   --accent: #4fc3f7;
+  /* --accent-fg: the color that sits ON TOP of an accent-filled button.
+     Dark theme uses near-black because sky-blue is light; light theme
+     uses white because indigo is dark. */
+  --accent-fg: #08131f;
   --success: #66bb6a;
   --error: #ef5350;
   --warning: #ffb74d;
   --border: rgba(255, 255, 255, 0.08);
+  --scrim: rgba(10, 10, 20, 0.55);
+  /* Subtle row hover; the color that "a little lighter than the bg" means. */
+  --hover-bg: rgba(255, 255, 255, 0.04);
+  /* Selected list row — accent-tinted. */
+  --selection-bg: rgba(79, 195, 247, 0.12);
+  /* Error hover (red-tinted) for close/delete buttons. */
+  --danger-hover: rgba(239, 83, 80, 0.15);
+  /* Warning glow (amber-tinted) for "running" indicators. */
+  --warning-glow: rgba(255, 183, 77, 0.2);
 
   --font-mono: "JetBrains Mono", Menlo, Monaco, "Courier New", monospace;
   --sidebar-width: 220px;
+}
+
+/*
+ * Light theme — base gray matches the user-requested RGB(244, 244, 244).
+ * Surface is a touch darker so the sidebar reads as a separate surface
+ * without losing contrast. Accent stays blue but shifts to a deeper
+ * Material-style indigo since sky-blue on white disappears into the bg.
+ */
+.theme-light {
+  --bg: #f4f4f4;
+  --surface: #ececec;
+  --surface-raised: #ffffff;
+  --text: #1a1a1a;
+  --muted: #6b7280;
+  --accent: #1976d2;
+  --accent-fg: #ffffff;
+  --success: #2e7d32;
+  --error: #c62828;
+  --warning: #e65100;
+  --border: rgba(0, 0, 0, 0.1);
+  --scrim: rgba(20, 20, 20, 0.2);
+  --hover-bg: rgba(0, 0, 0, 0.04);
+  --selection-bg: rgba(25, 118, 210, 0.12);
+  --danger-hover: rgba(198, 40, 40, 0.12);
+  --warning-glow: rgba(230, 81, 0, 0.2);
 }
 
 * { box-sizing: border-box; }

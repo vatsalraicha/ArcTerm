@@ -51,7 +51,7 @@
 }
 
 .sidebar-new:hover {
-  background: rgba(79, 195, 247, 0.1);
+  background: var(--selection-bg);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -106,11 +106,11 @@
 }
 
 .session-item:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--hover-bg);
 }
 
 .session-item.active {
-  background: rgba(79, 195, 247, 0.12);
+  background: var(--selection-bg);
 }
 
 .session-item.active::before {
@@ -144,7 +144,7 @@
 
 .session-item.running .session-dot {
   background: var(--warning);
-  box-shadow: 0 0 0 2px rgba(255, 183, 77, 0.2);
+  box-shadow: 0 0 0 2px var(--warning-glow);
 }
 
 .session-item.exit-ok .session-dot {
@@ -220,7 +220,7 @@
 }
 
 .session-close:hover {
-  background: rgba(239, 83, 80, 0.15);
+  background: var(--danger-hover);
   color: var(--error);
 }
 

@@ -20,7 +20,12 @@ import { Sidebar } from "./sidebar";
 import { AiPanel, type ExplainTarget } from "./ai-panel";
 import { aiIsAvailable, type AiContext } from "./ai";
 import { CompletionOverlay, type CompletionItem } from "./completion-overlay";
-import { isInternalCommand, runInternalCommand } from "./arcterm-commands";
+import {
+  isInternalCommand,
+  registerThemeApplier,
+  runInternalCommand,
+} from "./arcterm-commands";
+import type { ThemeName } from "./terminal";
 
 window.addEventListener("DOMContentLoaded", () => {
   const stackHost = requireEl("terminal-stack");
@@ -66,6 +71,16 @@ interface Mounts {
 
 async function boot(mounts: Mounts): Promise<void> {
   const manager = new SessionManager(mounts.stackHost);
+
+  // --- Theme ---------------------------------------------------------
+  //
+  // Apply the saved theme BEFORE the first session is created so xterm
+  // gets constructed with the right palette (no dark→light flash on
+  // boot for light-theme users). Theme lives on <html class="theme-*">
+  // so every CSS var cascades correctly.
+  const savedTheme = await readSavedTheme();
+  applyTheme(savedTheme, manager);
+  registerThemeApplier((next) => applyTheme(next, manager));
 
   // --- Prompt bar ------------------------------------------------------
   // HOME is inferred from the first cwd any session reports (shells start
@@ -365,6 +380,37 @@ async function boot(mounts: Mounts): Promise<void> {
   // The manager fires `active-changed` during create → renderPromptBar
   // already ran with the new session. Just focus the editor.
   editor.focus();
+}
+
+/**
+ * Read the saved theme from settings, defaulting to "dark" if the
+ * settings IPC fails or returns an unknown value. Bounded to the
+ * ThemeName union to prevent mysterious "theme-xyz" classes on <html>.
+ */
+async function readSavedTheme(): Promise<ThemeName> {
+  try {
+    const s = await invoke<{ theme?: string }>("settings_get");
+    return s.theme === "light" ? "light" : "dark";
+  } catch (err) {
+    console.warn("settings_get failed on boot; using dark theme", err);
+    return "dark";
+  }
+}
+
+/**
+ * Apply a theme everywhere it needs to land:
+ *   1. <html class="theme-*"> so all CSS vars swap
+ *   2. Live xterm instances in every session (they paint a canvas and
+ *      can't read CSS vars — we push a preset imperatively)
+ *   3. Future-session default inside SessionManager so newly-created
+ *      sessions start with the right palette, not a one-frame flicker
+ */
+function applyTheme(theme: ThemeName, manager: SessionManager): void {
+  const root = document.documentElement;
+  root.classList.remove("theme-dark", "theme-light");
+  root.classList.add(`theme-${theme}`);
+  manager.setInitialTheme(theme);
+  manager.applyTheme(theme);
 }
 
 /**

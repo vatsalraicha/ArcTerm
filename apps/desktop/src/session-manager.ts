@@ -25,7 +25,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { setupTerminal, type TerminalHandle } from "./terminal";
+import { setupTerminal, type TerminalHandle, type ThemeName } from "./terminal";
 
 export interface SessionState {
     /** User-facing name. Starts as "Session N"; user can rename via sidebar. */
@@ -87,8 +87,26 @@ export class SessionManager {
     private readonly updatedListeners = new Set<Listener>();
     private readonly activeChangedListeners = new Set<(id: string | null) => void>();
 
+    /** Current theme; applied to every session created from now on, and
+     *  pushed into existing sessions on change. */
+    private currentTheme: ThemeName = "dark";
+
     constructor(stackHost: HTMLElement) {
         this.stackHost = stackHost;
+    }
+
+    /** Set the initial theme before the first session is created so xterm
+     *  gets constructed with the right palette (no flash). */
+    setInitialTheme(theme: ThemeName): void {
+        this.currentTheme = theme;
+    }
+
+    /** Push a theme change to every live session's xterm. */
+    applyTheme(theme: ThemeName): void {
+        this.currentTheme = theme;
+        for (const s of this.sessions.values()) {
+            s.terminal.setTheme(theme);
+        }
     }
 
     /** Currently active session, or null if none exist (transient state
@@ -162,7 +180,7 @@ export class SessionManager {
 
         let terminal: TerminalHandle;
         try {
-            terminal = await setupTerminal(host);
+            terminal = await setupTerminal(host, this.currentTheme);
         } catch (err) {
             frame.remove();
             throw err;

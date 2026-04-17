@@ -7,7 +7,7 @@
 .arcterm-ai-panel {
   position: fixed;
   inset: 0;
-  background: rgba(10, 10, 20, 0.5);
+  background: var(--scrim);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -110,7 +110,7 @@
 .arcterm-ai-submit,
 .arcterm-ai-btn.primary {
   background: var(--accent);
-  color: #08131f;
+  color: var(--accent-fg);
   border: 1px solid var(--accent);
   font-weight: 600;
 }
