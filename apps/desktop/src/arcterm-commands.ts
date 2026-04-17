@@ -56,6 +56,12 @@ interface AiStatus {
     active_id: string;
     active_display_name: string;
     local_available: boolean;
+    local_model: {
+        id: string;
+        display_name: string;
+        quantization: string | null;
+        parameters: string | null;
+    } | null;
 }
 
 interface ProgressPayload {
@@ -148,10 +154,7 @@ async function cmdModel(session: Session, args: string[]): Promise<void> {
             session,
             `Current mode: \x1b[1;36m${status.mode}\x1b[0m (active: ${status.active_display_name})`,
         );
-        writeLine(
-            session,
-            `Local model: ${status.local_available ? "\x1b[32mready\x1b[0m" : "\x1b[33mnot loaded\x1b[0m"}`,
-        );
+        writeLine(session, `Local model:  ${formatLocalModel(status)}`);
         writeLine(session, "Set with: /arcterm-model <claude|local|auto>");
         return;
     }
@@ -278,10 +281,27 @@ async function cmdStatus(session: Session): Promise<void> {
         session,
         `Active:       ${status.active_display_name} (${status.active_id})`,
     );
-    writeLine(
-        session,
-        `Local model:  ${status.local_available ? "\x1b[32mready\x1b[0m" : "\x1b[33mnot loaded\x1b[0m"}`,
-    );
+    writeLine(session, `Local model:  ${formatLocalModel(status)}`);
+}
+
+/**
+ * Format the local-model line for both /arcterm-status and /arcterm-model.
+ * Returns either "ready — Gemma 4 E2B (Q4_K_M) [2.3B active / 5.1B total]"
+ * when a variant is loaded, or a colored "ready" / "not loaded" fallback.
+ */
+function formatLocalModel(status: AiStatus): string {
+    if (!status.local_available) {
+        return "\x1b[33mnot loaded\x1b[0m";
+    }
+    const m = status.local_model;
+    if (!m) {
+        return "\x1b[32mready\x1b[0m";
+    }
+    const meta = [m.quantization, m.parameters]
+        .filter((s): s is string => Boolean(s))
+        .join(", ");
+    const metaSuffix = meta ? ` \x1b[2m(${meta})\x1b[0m` : "";
+    return `\x1b[32mready\x1b[0m — ${m.display_name}${metaSuffix}`;
 }
 
 // -- Rendering helpers -------------------------------------------------

@@ -119,6 +119,18 @@ impl LocalLlamaBackend {
             display_label: "Gemma (local)",
         })
     }
+
+    /// Look up the registry entry matching this model's file on disk, if
+    /// any. Lets the status command show a precise "E2B Q4_K_M" label
+    /// instead of the generic "Gemma (local)". Returns None for models
+    /// loaded from a path outside the registry (future: user-supplied
+    /// GGUFs).
+    pub fn model_spec(&self) -> Option<&'static crate::models::ModelSpec> {
+        let basename = self.model_path.file_name()?.to_str()?;
+        crate::models::REGISTRY
+            .iter()
+            .find(|s| s.filename == basename)
+    }
 }
 
 #[async_trait]

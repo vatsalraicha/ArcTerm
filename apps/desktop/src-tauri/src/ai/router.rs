@@ -146,6 +146,13 @@ impl AiRouter {
         self.local.read().is_some()
     }
 
+    /// Borrow the loaded LocalLlamaBackend, if any. Used by ai_status to
+    /// surface the specific model variant (e.g. "Gemma 4 E2B Q4_K_M")
+    /// rather than just "local".
+    pub fn local_backend(&self) -> Option<Arc<LocalLlamaBackend>> {
+        self.local.read().clone()
+    }
+
     pub async fn is_available(&self) -> bool {
         self.active().is_available().await
     }

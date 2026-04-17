@@ -344,12 +344,42 @@ pub fn ai_set_mode(
 pub fn ai_status(
     router: State<'_, std::sync::Arc<AiRouter>>,
 ) -> serde_json::Value {
-    let active = router.inner().active();
+    let router = router.inner();
+    let active = router.active();
+    // Pull the specific model variant the local backend loaded, when one
+    // is loaded. If the loaded path doesn't match a registry entry (user
+    // dropped a custom GGUF in ~/.arcterm/models/ — future feature), fall
+    // back to the filename so the UI always shows SOMETHING recognizable.
+    let local_model = router.local_backend().map(|b| {
+        match b.model_spec() {
+            Some(spec) => serde_json::json!({
+                "id": spec.id,
+                "display_name": spec.display_name,
+                "quantization": spec.quantization,
+                "parameters": spec.parameters,
+            }),
+            None => {
+                let fallback = b
+                    .model_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(unknown)")
+                    .to_string();
+                serde_json::json!({
+                    "id": fallback.clone(),
+                    "display_name": fallback,
+                    "quantization": serde_json::Value::Null,
+                    "parameters": serde_json::Value::Null,
+                })
+            }
+        }
+    });
     serde_json::json!({
-        "mode": router.inner().current_mode().as_str(),
+        "mode": router.current_mode().as_str(),
         "active_id": active.id(),
         "active_display_name": active.display_name(),
-        "local_available": router.inner().local_available(),
+        "local_available": router.local_available(),
+        "local_model": local_model,
     })
 }
 
