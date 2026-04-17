@@ -19,6 +19,10 @@ target/
 # Claude (per Dos_And_Donts: keep .claude local, ignore in VCS)
 .claude/
 
+# Local project briefs — keep on disk, don't publish
+Dos_And_Donts.md
+Project_Prompt_Detailed.md
+
 # Logs
 *.log
 npm-debug.log*
