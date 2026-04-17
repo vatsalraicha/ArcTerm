@@ -167,27 +167,31 @@ pub fn list() -> Vec<ModelInfo> {
         .collect()
 }
 
-/// Sweep `~/.arcterm/models/` for stranded `.part` files and delete them.
+/// Sweep `~/.arcterm/models/` for stale `.part` files and delete them.
 ///
-/// These appear when a download crashes or is force-killed mid-transfer
-/// (we saw it during Phase 5b Q8 testing). A left-behind `.part` wastes
-/// disk forever because nothing in the app references it. Running the
-/// sweep once at startup is cheap (a single `read_dir`) and prevents
-/// the "where did my 4 GB go" surprise for users who re-try a download.
+/// A `.part` file appears when a download is interrupted mid-transfer
+/// (crash, kill -9, laptop closed on cellular). Two distinct situations:
 ///
-/// Returns the number of files removed + total bytes reclaimed so the
-/// caller (lib.rs) can log a meaningful summary.
+///   - **Recent** (< 7 days): probably a download the user wants to
+///     resume. The downloader re-opens these, rehashes the existing
+///     bytes, and continues via an HTTP Range request.
+///   - **Stale** (>= 7 days): the model or URL has likely changed; the
+///     bytes on disk are dead weight. Delete.
+///
+/// Returns (removed, bytes) for a log summary.
 pub fn cleanup_stranded_parts() -> (usize, u64) {
+    const STALE_AGE_SECS: u64 = 7 * 24 * 60 * 60;
     let Some(home) = std::env::var_os("HOME") else {
         return (0, 0);
     };
     let dir = std::path::PathBuf::from(home).join(".arcterm/models");
     let read = match std::fs::read_dir(&dir) {
         Ok(r) => r,
-        Err(_) => return (0, 0), // dir doesn't exist yet → nothing to do
+        Err(_) => return (0, 0),
     };
     let mut removed = 0usize;
     let mut bytes = 0u64;
+    let now = std::time::SystemTime::now();
     for entry in read.flatten() {
         let path = entry.path();
         let is_part = path
@@ -198,12 +202,27 @@ pub fn cleanup_stranded_parts() -> (usize, u64) {
         if !is_part {
             continue;
         }
-        if let Ok(meta) = entry.metadata() {
-            bytes += meta.len();
+        let Ok(meta) = entry.metadata() else { continue };
+        // Keep the .part if it's young enough to resume from. mtime works
+        // for our needs — modified-recently means the download was still
+        // writing not long ago.
+        if let Ok(mtime) = meta.modified() {
+            if let Ok(age) = now.duration_since(mtime) {
+                if age.as_secs() < STALE_AGE_SECS {
+                    log::info!(
+                        "preserving recent partial download for resume: {} ({} MB, {}s old)",
+                        path.display(),
+                        meta.len() / 1_048_576,
+                        age.as_secs()
+                    );
+                    continue;
+                }
+            }
         }
+        bytes += meta.len();
         if std::fs::remove_file(&path).is_ok() {
             removed += 1;
-            log::info!("removed stranded download: {}", path.display());
+            log::info!("removed stale download: {}", path.display());
         }
     }
     (removed, bytes)

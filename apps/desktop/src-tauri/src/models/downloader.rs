@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::ModelSpec;
 
@@ -128,6 +128,40 @@ async fn download_inner(
         local_path.extension().and_then(|s| s.to_str()).unwrap_or("")
     ));
 
+    // Resume support: if a .part already exists from a previous attempt,
+    // try to continue from where we left off via an HTTP Range request.
+    // Saves the user hours of re-download on a flaky connection. We
+    // re-hash the existing bytes so the final SHA256 verification still
+    // covers the full file; reads sequentially from disk, typically
+    // 200-500 MB/s on an SSD so even a 7 GB .part rehashes in under 30s.
+    let resume_from: u64 = tokio::fs::metadata(&part_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let mut hasher = Sha256::new();
+    if resume_from > 0 {
+        log::info!(
+            "download resume: rehashing {} bytes of {}",
+            resume_from,
+            part_path.display()
+        );
+        let mut existing = tokio::fs::File::open(&part_path)
+            .await
+            .map_err(|e| format!("open existing part {}: {e}", part_path.display()))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = existing
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("rehash read: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+
     let client = reqwest::Client::builder()
         // A model download can easily take 10 minutes on a slow link;
         // keep the outer timeout generous. Per-read timeouts are handled
@@ -136,30 +170,64 @@ async fn download_inner(
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let resp = client
-        .get(spec.url)
+    // Range header when resuming. RFC 7233: `bytes=<start>-` (no end
+    // means "to the end of the resource"). Servers that support ranges
+    // respond with 206 Partial Content + Content-Range; servers that
+    // don't respond with 200 OK and the full body, which we detect
+    // below and restart-from-zero cleanly.
+    let mut req = client.get(spec.url);
+    if resume_from > 0 {
+        req = req.header("Range", format!("bytes={}-", resume_from));
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("GET {}: {e}", spec.url))?;
-    if !resp.status().is_success() {
+    let status = resp.status();
+
+    let (mut file, mut downloaded, bytes_total) = if status.as_u16() == 206 {
+        // Server honored our Range — open the .part for append, continue.
+        let total = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_range_total)
+            .unwrap_or(spec.size_bytes);
+        let f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&part_path)
+            .await
+            .map_err(|e| format!("open for append {}: {e}", part_path.display()))?;
+        log::info!(
+            "download resume accepted: {} / {} bytes already on disk",
+            resume_from,
+            total
+        );
+        (f, resume_from, total)
+    } else if status.is_success() {
+        // 200 OK despite our Range header → server ignored us (or we
+        // had no .part to begin with). Treat as a fresh download:
+        // truncate the .part, reset hasher, start at zero.
+        if resume_from > 0 {
+            log::warn!(
+                "server ignored Range header; restarting download from zero"
+            );
+            hasher = Sha256::new();
+        }
+        let total = resp.content_length().unwrap_or(spec.size_bytes);
+        let f = tokio::fs::File::create(&part_path)
+            .await
+            .map_err(|e| format!("create {}: {e}", part_path.display()))?;
+        (f, 0u64, total)
+    } else {
         return Err(format!(
             "download failed: {} returned {}",
-            spec.url,
-            resp.status()
+            spec.url, status
         ));
-    }
+    };
 
-    let bytes_total = resp
-        .content_length()
-        .unwrap_or(spec.size_bytes);
     let mut stream = resp.bytes_stream();
-
-    let mut file = tokio::fs::File::create(&part_path)
-        .await
-        .map_err(|e| format!("create {}: {e}", part_path.display()))?;
-
-    let mut downloaded: u64 = 0;
-    let mut hasher = Sha256::new();
     // Throttle progress events: the stream yields small chunks and we
     // don't want to flood the IPC bus with hundreds of events per second.
     let mut last_emit: u64 = 0;
@@ -236,6 +304,15 @@ mod hex {
         }
         s
     }
+}
+
+/// Parse the total-size portion of a `Content-Range` header.
+/// Format: `bytes <start>-<end>/<total>` (or `bytes <start>-<end>/*`
+/// when total is unknown). Returns None if we can't parse.
+fn parse_content_range_total(header: &str) -> Option<u64> {
+    // Example: "bytes 4500000-7999999/8000000"
+    let total_part = header.rsplit_once('/').map(|(_, r)| r)?;
+    total_part.parse().ok()
 }
 
 // Compile-time sanity check: our Path import stays in scope.
