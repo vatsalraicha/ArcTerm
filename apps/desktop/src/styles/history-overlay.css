@@ -1,0 +1,149 @@
+/*
+ * History overlay. Fullscreen scrim + centered panel. Rendered above
+ * everything else in #app (z-index > input-dock).
+ */
+
+.arcterm-history-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 20, 0.55);
+  display: flex;
+  align-items: flex-end;       /* slide up from near the input dock */
+  justify-content: center;
+  z-index: 100;
+  /* Keyboard-focus the scrim itself when opened in "browse" mode so the
+     container's keydown handler catches arrow keys before anything else. */
+  outline: none;
+  padding: 24px 16px 96px;
+}
+
+.arcterm-history-overlay[tabindex] { outline: none; }
+.arcterm-history-overlay.hidden {
+  display: none;
+}
+
+.arcterm-history-panel {
+  width: min(720px, 100%);
+  max-height: 60vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: arcterm-history-in 160ms ease-out;
+}
+
+@keyframes arcterm-history-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.arcterm-history-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.arcterm-history-search-icon {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.arcterm-history-search input {
+  flex: 1 1 auto;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  border: none;
+  outline: none;
+}
+
+.arcterm-history-search input::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.arcterm-history-list {
+  flex: 1 1 auto;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+}
+
+.arcterm-history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  /* Prevent wrapping of the command within a single item — overflow is
+     hidden, which keeps each row at a predictable height for keyboard nav. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arcterm-history-item:hover,
+.arcterm-history-item.selected {
+  background: rgba(79, 195, 247, 0.12);
+}
+
+.arcterm-history-cmd {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arcterm-history-meta {
+  color: var(--muted);
+  font-size: 11px;
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.arcterm-history-ok {
+  color: var(--success, #66bb6a);
+}
+
+.arcterm-history-err {
+  color: var(--error, #ef5350);
+}
+
+.arcterm-history-cwd {
+  opacity: 0.75;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+.arcterm-history-empty {
+  color: var(--muted);
+  padding: 24px 14px;
+  text-align: center;
+  font-style: italic;
+}
+
+.arcterm-history-footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}

@@ -2,10 +2,12 @@
 //! reused by integration tests and (later) the VS Code extension's host
 //! process if we ever decide to share the Rust core.
 
+pub mod history;
 pub mod ipc;
 pub mod pty;
 pub mod shell_hooks;
 
+use history::HistoryStore;
 use pty::PtyManager;
 
 /// Build and run the Tauri app. Called from `main.rs`.
@@ -21,18 +23,41 @@ pub fn run() {
         }
     };
 
+    // History is optional in the same sense — if SQLite can't open we log
+    // and continue without autosuggest/overlay features.
+    let history = match HistoryStore::open() {
+        Ok(h) => Some(h),
+        Err(e) => {
+            log::warn!("history store unavailable: {e}");
+            None
+        }
+    };
+
     let pty_manager = PtyManager::new(shell_paths);
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // PtyManager owns all live PTYs. Stored in Tauri state so command
         // handlers can reach it via `tauri::State<PtyManager>`.
-        .manage(pty_manager)
+        .manage(pty_manager);
+
+    // Only register the HistoryStore state when the DB opened cleanly.
+    // Absent state makes history_* commands fail with a clear error rather
+    // than silently misbehaving.
+    if let Some(h) = history {
+        builder = builder.manage(h);
+    }
+
+    builder
         .invoke_handler(tauri::generate_handler![
             ipc::pty_spawn,
             ipc::pty_write,
             ipc::pty_resize,
             ipc::pty_kill,
+            ipc::history_insert,
+            ipc::history_update_exit,
+            ipc::history_search,
+            ipc::history_autosuggest,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ArcTerm");

@@ -48,10 +48,20 @@ export interface TerminalHandle {
   send: (data: string) => Promise<void>;
   /** Subscribe to cwd updates emitted via OSC 7 from the shell. */
   onCwdChange: (cb: (cwd: string) => void) => void;
+  /** Subscribe to git-branch updates from custom OSC 1337 ArcTermBranch. */
+  onBranchChange: (cb: (branch: string) => void) => void;
+  /** Fires when the shell finishes a command (OSC 133;D;<exit>). */
+  onCommandEnd: (cb: (exitCode: number) => void) => void;
   /** Current known cwd, or null until the shell reports one. */
   getCwd: () => string | null;
+  /** Insert a visual block-start separator into the terminal output. */
+  writeBlockStart: (command: string) => void;
+  /** Insert a visual block-end separator with exit code + duration. */
+  writeBlockEnd: (exitCode: number | null, durationMs: number | null) => void;
   /** Move keyboard focus into xterm (for TUI programs that need direct keys). */
   focus: () => void;
+  /** Unique id for this PTY session — stored with history entries. */
+  sessionId: string;
 }
 
 export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> {
@@ -108,6 +118,41 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
       for (const cb of cwdListeners) cb(cwd);
     }
     return true;
+  });
+
+  // --- OSC 133 handler: block boundary markers -------------------------
+  // arcterm.zsh only emits ";D;<exit_code>" — ArcTerm decides block-start
+  // itself when the user presses Enter. Parameters are split by ';'.
+  const commandEndListeners = new Set<(exitCode: number) => void>();
+  term.parser.registerOscHandler(133, (payload: string) => {
+    const parts = payload.split(";");
+    if (parts[0] === "D") {
+      // Exit code defaults to 0 if absent; zsh always sends one though.
+      const code = Number.parseInt(parts[1] ?? "0", 10);
+      if (!Number.isNaN(code)) {
+        for (const cb of commandEndListeners) cb(code);
+      }
+    }
+    return true;
+  });
+
+  // --- OSC 1337 handler: ArcTerm custom key/value ----------------------
+  // Format emitted by arcterm.zsh: `ArcTermBranch=<name>`. iTerm uses
+  // OSC 1337 broadly for its own keys; we namespace with the `ArcTerm`
+  // prefix so we can add more keys later without collision.
+  const branchListeners = new Set<(branch: string) => void>();
+  term.parser.registerOscHandler(1337, (payload: string) => {
+    const eq = payload.indexOf("=");
+    if (eq === -1) return false; // not key/value; let other handlers try
+    const key = payload.slice(0, eq);
+    const value = payload.slice(eq + 1);
+    if (key === "ArcTermBranch") {
+      for (const cb of branchListeners) cb(value);
+      return true;
+    }
+    // Unknown ArcTerm* keys: consume silently so they don't render as garbage.
+    if (key.startsWith("ArcTerm")) return true;
+    return false;
   });
 
   const ptyId = await invoke<string>("pty_spawn", {
@@ -179,9 +224,71 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
       // Replay the current cwd so late subscribers don't miss it.
       if (currentCwd) cb(currentCwd);
     },
+    onBranchChange: (cb) => branchListeners.add(cb),
+    onCommandEnd: (cb) => commandEndListeners.add(cb),
     getCwd: () => currentCwd,
+    writeBlockStart: (command: string) => writeBlockStart(term, command),
+    writeBlockEnd: (exitCode, durationMs) =>
+      writeBlockEnd(term, exitCode, durationMs),
     focus: () => term.focus(),
+    sessionId: ptyId,
   };
+}
+
+/**
+ * Render a block-start separator directly into the xterm buffer. This is
+ * visual only — the actual command gets sent to the PTY separately. We
+ * print the prompt-like header ourselves rather than waiting for the shell
+ * to echo it, because our shell integration suppresses the shell's prompt
+ * entirely.
+ *
+ * Format:
+ *   (blank line)
+ *   ❯ <command>
+ *   (blank line after shell output; closed by writeBlockEnd)
+ *
+ * ANSI codes: dim blue sigil, bright white command.
+ */
+function writeBlockStart(term: Terminal, command: string): void {
+  // \r\n pair because the PTY uses \r\n line endings; xterm's cursor is
+  // wherever the last output left it, so start with \r\n to drop to a
+  // guaranteed fresh line before the block header.
+  const sigil = "\x1b[38;2;79;195;247m❯\x1b[0m"; // accent blue
+  const cmdLine = `\x1b[1;97m${command}\x1b[0m`; // bold white
+  term.write(`\r\n${sigil} ${cmdLine}\r\n`);
+}
+
+/**
+ * Render a block-end separator: a thin horizontal line with exit-code and
+ * duration annotations. Exit 0 gets a dim green check; non-zero gets a red
+ * cross plus the code. Duration formatted as ms / s / m based on magnitude.
+ */
+function writeBlockEnd(
+  term: Terminal,
+  exitCode: number | null,
+  durationMs: number | null,
+): void {
+  const status =
+    exitCode === null
+      ? ""
+      : exitCode === 0
+        ? "\x1b[38;2;102;187;106m✓\x1b[0m"
+        : `\x1b[38;2;239;83;80m✗ ${exitCode}\x1b[0m`;
+  const dur =
+    durationMs === null
+      ? ""
+      : `\x1b[2m${formatDuration(durationMs)}\x1b[0m`;
+  const line = "\x1b[2m" + "─".repeat(Math.max(term.cols - 12, 10)) + "\x1b[0m";
+  const suffix = [status, dur].filter(Boolean).join(" ");
+  term.write(`\r\n${line}${suffix ? " " + suffix : ""}\r\n`);
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m${s}s`;
 }
 
 /**

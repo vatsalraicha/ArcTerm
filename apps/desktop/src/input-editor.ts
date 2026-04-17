@@ -1,27 +1,29 @@
 /**
  * ArcTerm's custom input editor.
  *
- * A contenteditable div pinned at the bottom of the window. Modern editor
- * ergonomics (Cmd+← line-jump, Option+← word-jump, multi-line Shift+Enter,
- * standard text selection) — the entire point of the widget is that typing
- * here feels like a code editor, not a VT100 line buffer.
+ * A contenteditable div pinned at the bottom of the window. The entire
+ * point of the widget is that typing here feels like a code editor, not
+ * a VT100 line buffer — full caret, multi-line, macOS keybindings, and
+ * (Phase 3) ghost-text autocomplete and an Up-arrow history overlay.
  *
  * Why contenteditable and not a textarea?
- *   - textarea forces a single monospace font metric and limited styling;
- *     we need inline decorations (ghost text in Phase 3, token highlights,
- *     later command-argument hints) that HTML nodes inside contenteditable
- *     give us for free.
- *   - WebKit (Tauri on macOS) handles most macOS keybindings natively inside
- *     contenteditable — Cmd+←, Option+←, selections, clipboard — so we only
- *     need to intercept the commands that mean something ArcTerm-specific
- *     (Enter, Tab, ↑/↓, Escape, Ctrl+C).
+ *   - A textarea can't show mixed styles (typed text normal, ghost text
+ *     dimmed) in the same line. We render ghost text as a child span
+ *     with `contenteditable=false` so the caret skips over it naturally.
+ *   - WebKit handles most macOS keybindings natively inside contenteditable
+ *     — Cmd+←, Option+←, selections, clipboard — so we only intercept the
+ *     commands that mean something ArcTerm-specific (Enter, Tab, ↑/↓, Esc,
+ *     Ctrl+C).
  *
- * Responsibilities this file owns:
- *   - Render the editor, keep focus, show a blinking caret when empty.
- *   - Emit `onSubmit(text)` when Enter is pressed.
- *   - Forward Ctrl+C to the PTY via a caller-supplied `onInterrupt`.
- *   - Emit a placeholder for ↑ (history — Phase 3) and Tab (autocomplete —
- *     also Phase 3) so they don't leak into the shell in the meantime.
+ * Ghost-text protocol (Phase 3):
+ *   1. On every keystroke that changes the text, we debounce 50ms and ask
+ *      the caller's `suggestFor(prefix)` for the best completion.
+ *   2. The returned suffix is appended as a non-editable span after the
+ *      user's typed text. Because it lives inside .arcterm-input-editor,
+ *      it's styled dim; because it's contenteditable=false, the caret
+ *      can't enter it and Shift+→ selections stop at its left edge.
+ *   3. `→` at the end of input accepts the suggestion (replaces ghost
+ *      span with real text); `Tab` same; any typed character replaces it.
  */
 
 export interface InputEditorOptions {
@@ -30,63 +32,69 @@ export interface InputEditorOptions {
     onSubmit: (command: string) => void;
     /** Fired on Ctrl+C. Caller decides whether to forward as SIGINT. */
     onInterrupt?: () => void;
-    /** Fired on ↑ — reserved for Phase 3 history overlay. */
+    /** Fired on ↑ — Phase 3 opens the history overlay. */
     onHistoryUp?: () => void;
-    /** Fired on ↓ — reserved for Phase 3 history overlay. */
+    /** Fired on ↓ — reserved for Phase 3 history overlay navigation. */
     onHistoryDown?: () => void;
-    /** Fired on Tab — reserved for Phase 3 autocomplete. */
-    onComplete?: () => void;
+    /** Fired on Ctrl+R — opens history overlay in search mode. */
+    onSearchHistory?: () => void;
+    /**
+     * Look up an autosuggest completion for the given prefix. Return the
+     * *suffix* to show (i.e. what follows the prefix), not the full command.
+     * Returning null/empty string hides the ghost.
+     */
+    suggestFor?: (prefix: string) => Promise<string | null>;
 }
+
+const GHOST_CLASS = "arcterm-ghost";
+const SUGGEST_DEBOUNCE_MS = 50;
 
 export class InputEditor {
     private readonly el: HTMLDivElement;
     private readonly opts: InputEditorOptions;
+    private suggestTimer: number | undefined;
+    private suggestSeq = 0; // monotonic — discard stale async results
 
     constructor(opts: InputEditorOptions) {
         this.opts = opts;
 
-        // Build the editor element. We create it ourselves instead of taking
-        // it from the DOM so callers only have to hand us a host container.
         const el = document.createElement("div");
         el.className = "arcterm-input-editor";
         el.contentEditable = "true";
-        // spellcheck off: squiggly red underlines on shell commands are
-        // annoying and break the monospaced grid.
         el.spellcheck = false;
-        // `autocorrect` is non-standard but WebKit honors it.
         el.setAttribute("autocorrect", "off");
         el.setAttribute("autocapitalize", "off");
         el.setAttribute("aria-label", "ArcTerm command input");
-        // Screen-reader role: treat as a textbox so assistive tech doesn't
-        // mistake it for generic static content.
         el.setAttribute("role", "textbox");
         el.setAttribute("aria-multiline", "true");
         this.el = el;
 
         opts.host.appendChild(el);
-
         this.attachEventHandlers();
 
         // Focus on mount so the user can start typing immediately.
         requestAnimationFrame(() => el.focus());
     }
 
-    /** Current editor contents, newlines preserved. */
+    /** Current editor contents (excluding ghost-text span), newlines preserved. */
     getValue(): string {
-        // innerText preserves line breaks from <div>/<br> the way a user
-        // expects ("what I see on screen"), unlike textContent which would
-        // concatenate everything into one line.
-        return this.el.innerText.replace(/\u00a0/g, " ");
+        // Clone so we can strip the ghost span without mutating the live DOM.
+        const clone = this.el.cloneNode(true) as HTMLDivElement;
+        clone.querySelectorAll(`.${GHOST_CLASS}`).forEach((n) => n.remove());
+        return clone.innerText.replace(/\u00a0/g, " ");
     }
 
     /** Replace editor contents. Cursor lands at the end. */
     setValue(text: string): void {
+        this.removeGhost();
         this.el.textContent = text;
         this.moveCursorToEnd();
+        this.scheduleSuggest();
     }
 
     /** Empty the editor. */
     clear(): void {
+        this.removeGhost();
         this.el.textContent = "";
     }
 
@@ -99,6 +107,7 @@ export class InputEditor {
 
     private attachEventHandlers(): void {
         this.el.addEventListener("keydown", this.onKeyDown);
+        this.el.addEventListener("input", this.onInput);
         this.el.addEventListener("paste", this.onPaste);
     }
 
@@ -110,13 +119,15 @@ export class InputEditor {
                 // contenteditable is to insert a new <div>, which survives
                 // innerText correctly. We let the browser handle it rather
                 // than re-implementing line insertion at the caret.
+                // Also strip any visible ghost first so the suggestion
+                // doesn't end up accidentally committed mid-line.
+                this.removeGhost();
                 return;
             }
             // Plain Enter = submit.
             ev.preventDefault();
+            this.removeGhost();
             const text = this.getValue();
-            // A totally-empty submit (just Enter on a blank line) still
-            // emits so the caller can echo a fresh prompt like real zsh.
             this.opts.onSubmit(text);
             this.clear();
             return;
@@ -125,29 +136,44 @@ export class InputEditor {
         // --- Ctrl+C: forward to PTY as SIGINT ---
         if (ev.ctrlKey && !ev.metaKey && !ev.altKey && ev.key === "c") {
             ev.preventDefault();
-            // If there's a selection, let the browser do the copy — but in
-            // this editor the user rarely needs to copy what they typed.
-            // Check for selection first; if empty, interrupt.
             const sel = window.getSelection();
             if (sel && sel.toString().length > 0) {
-                // Let default copy proceed.
-                return;
+                return; // let default copy proceed
             }
             this.opts.onInterrupt?.();
             this.clear();
             return;
         }
 
-        // --- Tab: placeholder for autocomplete (Phase 3) ---
-        if (ev.key === "Tab") {
+        // --- Ctrl+R: search history ---
+        if (ev.ctrlKey && !ev.metaKey && !ev.altKey && ev.key === "r") {
             ev.preventDefault();
-            this.opts.onComplete?.();
+            this.opts.onSearchHistory?.();
             return;
         }
 
-        // --- ↑/↓: placeholder for history overlay (Phase 3) ---
+        // --- Tab: accept autosuggestion if present ---
+        if (ev.key === "Tab") {
+            ev.preventDefault();
+            if (!this.acceptGhost()) {
+                // No ghost to accept — reserved for tab completion in a
+                // future phase. Swallow so focus doesn't escape the editor.
+            }
+            return;
+        }
+
+        // --- Arrow right at end of line: accept ghost ---
+        if (ev.key === "ArrowRight" && this.caretAtEnd() && !ev.shiftKey) {
+            if (this.acceptGhost()) {
+                ev.preventDefault();
+                return;
+            }
+            // No ghost, fall through to native caret motion.
+        }
+
+        // --- ↑/↓: history overlay hooks (Phase 3) ---
         // We swallow these so they don't move the caret into multi-line
-        // editing mode unexpectedly. In Phase 3 this opens a history browser.
+        // editing mode unexpectedly.
         if (ev.key === "ArrowUp") {
             ev.preventDefault();
             this.opts.onHistoryUp?.();
@@ -167,8 +193,15 @@ export class InputEditor {
         }
 
         // Everything else — Cmd+←, Option+←, Cmd+A, Cmd+C/V/X on selection,
-        // normal typing — falls through to WebKit's built-in handling, which
-        // implements macOS conventions correctly inside contenteditable.
+        // normal typing — falls through to WebKit's built-in handling.
+    };
+
+    /** Fires after any content mutation. We use it to refresh the ghost. */
+    private readonly onInput = (): void => {
+        // Any typed char invalidates the current ghost. Remove immediately
+        // (don't wait for the debounce) so a stale suggestion can't flash.
+        this.removeGhost();
+        this.scheduleSuggest();
     };
 
     /**
@@ -186,6 +219,124 @@ export class InputEditor {
         // ever removes it.
         document.execCommand("insertText", false, text);
     };
+
+    // --- Suggestion plumbing ---------------------------------------------
+
+    private scheduleSuggest(): void {
+        if (!this.opts.suggestFor) return;
+        window.clearTimeout(this.suggestTimer);
+        this.suggestTimer = window.setTimeout(() => this.refreshSuggest(), SUGGEST_DEBOUNCE_MS);
+    }
+
+    private async refreshSuggest(): Promise<void> {
+        const fn = this.opts.suggestFor;
+        if (!fn) return;
+
+        const prefix = this.getValue();
+        // Monotonic sequence so a slow earlier query that resolves after a
+        // later one can't overwrite the newer suggestion.
+        const seq = ++this.suggestSeq;
+
+        // Don't suggest when empty or when caret isn't at end of input —
+        // ghost text in the middle of a line is confusing.
+        if (!prefix || !this.caretAtEnd()) {
+            this.removeGhost();
+            return;
+        }
+        let suffix: string | null = null;
+        try {
+            suffix = await fn(prefix);
+        } catch (err) {
+            console.error("suggestFor failed", err);
+            return;
+        }
+        if (seq !== this.suggestSeq) return; // stale
+        if (!suffix) {
+            this.removeGhost();
+            return;
+        }
+        // Drop suggestions that contain a newline — multi-line ghost text
+        // would shift the editor height on every keystroke, which feels bad.
+        if (suffix.includes("\n")) return;
+        this.renderGhost(suffix);
+    }
+
+    private renderGhost(suffix: string): void {
+        this.removeGhost();
+        const span = document.createElement("span");
+        span.className = GHOST_CLASS;
+        span.contentEditable = "false";
+        // Use a data attribute for the text so CSS can ::before it if we
+        // later want to restyle without re-rendering. For now, textContent.
+        span.textContent = suffix;
+        this.el.appendChild(span);
+        // Make sure caret doesn't drift into the span. It shouldn't
+        // (contenteditable=false blocks it) but a stray click could try.
+    }
+
+    private removeGhost(): void {
+        this.el.querySelectorAll(`.${GHOST_CLASS}`).forEach((n) => n.remove());
+    }
+
+    /**
+     * Accept the current ghost: replace the span with real text. Return
+     * true if there was a ghost to accept.
+     */
+    private acceptGhost(): boolean {
+        const ghost = this.el.querySelector(`.${GHOST_CLASS}`);
+        if (!ghost) return false;
+        const text = ghost.textContent ?? "";
+        ghost.remove();
+        // insertText places the string at the caret and respects undo.
+        // Before inserting, make sure the caret is at the end (it should be,
+        // but a click could've moved it).
+        this.moveCursorToEnd();
+        document.execCommand("insertText", false, text);
+        return true;
+    }
+
+    /** Is the caret at the very end of the editable content (excluding ghost)? */
+    private caretAtEnd(): boolean {
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return true;
+        const range = sel.getRangeAt(0);
+        if (!range.collapsed) return false;
+        // Walk forward from the caret to the editor end; if only ghost
+        // spans lie between, we count as "at end" for ghost-accept logic.
+        let node: Node | null = range.endContainer;
+        let offset = range.endOffset;
+        while (node) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                if (offset < (node.nodeValue ?? "").length) return false;
+            } else if (node instanceof Element) {
+                // Walk into child nodes beyond the end offset.
+                for (let i = offset; i < node.childNodes.length; i++) {
+                    const child = node.childNodes[i];
+                    if (
+                        child instanceof Element &&
+                        child.classList.contains(GHOST_CLASS)
+                    ) {
+                        continue;
+                    }
+                    // Any non-ghost node after the caret means we're not at end.
+                    if (child.textContent && child.textContent.length > 0) {
+                        return false;
+                    }
+                }
+            }
+            // Climb to next sibling or ancestor.
+            if (node === this.el) break;
+            if (node.parentNode && node.parentNode !== this.el) {
+                const parent = node.parentNode;
+                offset =
+                    Array.prototype.indexOf.call(parent.childNodes, node) + 1;
+                node = parent;
+            } else {
+                break;
+            }
+        }
+        return true;
+    }
 
     private moveCursorToEnd(): void {
         const range = document.createRange();

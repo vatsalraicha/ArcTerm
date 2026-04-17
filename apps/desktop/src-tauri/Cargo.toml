@@ -39,6 +39,11 @@ uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 env_logger = "0.11"
 
+# SQLite for command history. `bundled` builds sqlite from source so we
+# don't depend on the system library version (and we get the same feature
+# flags on every developer's machine).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [features]
 # Tauri v2 expects a `custom-protocol` feature flag for the production build.
 custom-protocol = ["tauri/custom-protocol"]
