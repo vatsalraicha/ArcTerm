@@ -80,9 +80,37 @@ impl Drop for DownloadGuard<'_> {
 
 /// Progress-reporting download, emitting events via the supplied AppHandle.
 /// Returns the absolute path on success.
+///
+/// The work is wrapped in tokio::spawn + recoverable catch so that a
+/// transport-level panic (reqwest has bubbled panics historically on
+/// mid-stream disconnects on macOS) can't propagate up and take the
+/// whole Tauri process with it. We convert panics into `Err(...)` so
+/// the UI shows a clean error instead of a hard app crash.
 pub async fn download(
     app: AppHandle,
     spec: &ModelSpec,
+) -> Result<String, String> {
+    let spec = spec.clone();
+    match tokio::spawn(async move { download_inner(app, spec).await }).await {
+        Ok(result) => result,
+        Err(join_err) if join_err.is_panic() => {
+            Err(format!(
+                "download task panicked: {:?}. This sometimes happens on \
+                 flaky networks when reqwest's HTTP/2 stream disconnects \
+                 abruptly. Retry the download; a resume-friendly implementation \
+                 is on the Phase 7 polish list.",
+                join_err
+            ))
+        }
+        Err(join_err) => Err(format!("download task failed to join: {join_err}")),
+    }
+}
+
+/// Body of the download. Split out so we can wrap it in a panic catcher
+/// in the public `download()` entry point.
+async fn download_inner(
+    app: AppHandle,
+    spec: ModelSpec,
 ) -> Result<String, String> {
     let local_path = spec
         .local_path()

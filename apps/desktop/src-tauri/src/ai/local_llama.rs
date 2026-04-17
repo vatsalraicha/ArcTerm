@@ -166,10 +166,14 @@ impl AiBackend for LocalLlamaBackend {
         // failures surface on this task, not the worker — cleaner error
         // propagation back to the caller.
         let user_content = compose_user_message(&req);
-        let prompt = match &self.chat_template {
+        // Try the GGUF's own template first. If apply fails (Gemma 4's
+        // Jinja template uses conditionals that llama.cpp's legacy parser
+        // rejects with `ffi error -1`), gracefully fall back to our
+        // hardcoded template — same one Phase 5b used successfully for
+        // Gemma 3. We do NOT propagate the error because falling back
+        // produces usable output; only a logged warning.
+        let (prompt, template_aware) = match &self.chat_template {
             Some(tmpl) => {
-                // Apply the GGUF's own template. Hold the model lock for
-                // the apply call; it's a cheap string-format operation.
                 let msg = match LlamaChatMessage::new(
                     "user".to_string(),
                     user_content.clone(),
@@ -182,16 +186,20 @@ impl AiBackend for LocalLlamaBackend {
                 };
                 let model_guard = model.lock();
                 match model_guard.apply_chat_template(tmpl, &[msg], true) {
-                    Ok(s) => s,
+                    Ok(s) => (s, true),
                     Err(e) => {
-                        let _ = tx.send(Err(format!("apply_chat_template: {e}")));
-                        return UnboundedReceiverStream::new(rx).boxed();
+                        log::warn!(
+                            "apply_chat_template failed ({e}); falling back to \
+                             hardcoded Gemma template. This usually means the \
+                             model's Jinja uses features llama.cpp's legacy parser \
+                             doesn't support."
+                        );
+                        (hardcoded_gemma_template(&user_content), false)
                     }
                 }
             }
-            None => hardcoded_gemma_template(&user_content),
+            None => (hardcoded_gemma_template(&user_content), false),
         };
-        let template_aware = self.chat_template.is_some();
 
         tokio::task::spawn_blocking(move || {
             run_inference(backend, model, prompt, template_aware, tx);
