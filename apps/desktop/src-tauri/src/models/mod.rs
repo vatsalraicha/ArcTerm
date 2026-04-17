@@ -68,14 +68,19 @@ impl ModelSpec {
 /// when we ship the first release; meanwhile `downloader::verify` treats
 /// an empty string as "skip verification". Leaving it empty for now is
 /// safer than hardcoding a wrong hash that would break downloads.
+// NOTE: bartowski's repo names its files with a `google_` prefix (mirroring
+// the original upstream model id). Dropping the prefix produces 404s.
+// If we add another publisher's quants later, their naming convention may
+// differ — always copy the exact filename shown on the HuggingFace "Files"
+// tab.
 pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         id: "gemma-4-e2b-it-q4km",
         display_name: "Gemma 4 E2B (Q4_K_M)",
         // bartowski's quant set — covers more quants than google/ggml-org
         // repos and is the de-facto standard community source.
-        url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
-        filename: "gemma-4-E2B-it-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/google_gemma-4-E2B-it-Q4_K_M.gguf",
+        filename: "google_gemma-4-E2B-it-Q4_K_M.gguf",
         sha256: "", // TODO: pin before tagging a release
         size_bytes: 3_460_000_000, // 3.46 GB approx
         parameters: "2.3B active / 5.1B total",
@@ -85,8 +90,8 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         id: "gemma-4-e2b-it-iq2m",
         display_name: "Gemma 4 E2B (IQ2_M, tight)",
-        url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-IQ2_M.gguf",
-        filename: "gemma-4-E2B-it-IQ2_M.gguf",
+        url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/google_gemma-4-E2B-it-IQ2_M.gguf",
+        filename: "google_gemma-4-E2B-it-IQ2_M.gguf",
         sha256: "",
         size_bytes: 2_620_000_000,
         parameters: "2.3B active / 5.1B total",
