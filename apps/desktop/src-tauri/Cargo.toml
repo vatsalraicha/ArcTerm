@@ -44,6 +44,16 @@ env_logger = "0.11"
 # flags on every developer's machine).
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Tokio: the `claude` CLI is invoked via tokio::process so stream-json
+# output can be piped line-by-line without blocking the Tauri event loop.
+# "process" + "io-util" + "macros" is the minimum feature set we need;
+# "rt-multi-thread" comes along for tokio::spawn inside the subprocess
+# reader task.
+tokio = { version = "1", features = ["process", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-trait = "0.1"
+futures = "0.3"
+
 [features]
 # Tauri v2 expects a `custom-protocol` feature flag for the production build.
 custom-protocol = ["tauri/custom-protocol"]

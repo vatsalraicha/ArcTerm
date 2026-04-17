@@ -2,11 +2,15 @@
 //! reused by integration tests and (later) the VS Code extension's host
 //! process if we ever decide to share the Rust core.
 
+pub mod ai;
 pub mod history;
 pub mod ipc;
 pub mod pty;
 pub mod shell_hooks;
 
+use std::sync::Arc;
+
+use ai::{AiRouter, claude::ClaudeCliBackend};
 use history::HistoryStore;
 use pty::PtyManager;
 
@@ -35,11 +39,19 @@ pub fn run() {
 
     let pty_manager = PtyManager::new(shell_paths);
 
+    // AI router. Phase 5a only registers Claude CLI; the router pattern is
+    // here so Phase 5b can add LocalLlamaBackend and an auto-fallback layer
+    // without changing command handlers or frontend code.
+    let ai_router: Arc<AiRouter> = Arc::new(AiRouter::new(Arc::new(
+        ClaudeCliBackend::default(),
+    )));
+
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // PtyManager owns all live PTYs. Stored in Tauri state so command
         // handlers can reach it via `tauri::State<PtyManager>`.
-        .manage(pty_manager);
+        .manage(pty_manager)
+        .manage(ai_router);
 
     // Only register the HistoryStore state when the DB opened cleanly.
     // Absent state makes history_* commands fail with a clear error rather
@@ -58,6 +70,10 @@ pub fn run() {
             ipc::history_update_exit,
             ipc::history_search,
             ipc::history_autosuggest,
+            ipc::ai_is_available,
+            ipc::ai_active_backend,
+            ipc::ai_ask,
+            ipc::ai_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ArcTerm");

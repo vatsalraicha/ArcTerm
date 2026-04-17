@@ -17,6 +17,8 @@ import { SessionManager, type Session } from "./session-manager";
 import { InputEditor } from "./input-editor";
 import { HistoryOverlay } from "./history-overlay";
 import { Sidebar } from "./sidebar";
+import { AiPanel, type ExplainTarget } from "./ai-panel";
+import { aiIsAvailable, type AiContext } from "./ai";
 
 window.addEventListener("DOMContentLoaded", () => {
   const stackHost = requireEl("terminal-stack");
@@ -111,33 +113,39 @@ async function boot(mounts: Mounts): Promise<void> {
   });
 
   // --- Input editor ----------------------------------------------------
+  //
+  // Submission logic lives in `submitCommand` so both user-typed commands
+  // and AI-panel "Run" buttons take the same path (block header + history
+  // insert + PTY send). Empty-command behavior is preserved here: bare Enter
+  // pushes a \r to the shell so it still feels responsive.
+  const submitCommand = (active: Session, command: string) => {
+    active.terminal.writeBlockStart(command);
+    manager.markCommandStart(active.id, command, null);
+    const cwd = active.state.cwd;
+    invoke<number>("history_insert", {
+      command,
+      cwd,
+      startedAt: Math.floor(Date.now() / 1000),
+      sessionId: active.id,
+    })
+      .then((id) => manager.attachHistoryId(active.id, id))
+      .catch((err) => console.error("history_insert failed", err));
+
+    active.terminal.send(command + "\r").catch((err) =>
+      console.error("send command failed", err),
+    );
+  };
+
   const editor = new InputEditor({
     host: mounts.editorHost,
     onSubmit: (command) => {
       const active = manager.active;
-      if (!active) return; // no session yet (shouldn't happen post-boot)
-
+      if (!active) return;
       if (!command.trim()) {
-        // Empty Enter: pass a bare \r to the shell for a visual "nudge".
         active.terminal.send("\r").catch(() => {});
         return;
       }
-
-      active.terminal.writeBlockStart(command);
-      manager.markCommandStart(active.id, command, null);
-      const cwd = active.state.cwd;
-      invoke<number>("history_insert", {
-        command,
-        cwd,
-        startedAt: Math.floor(Date.now() / 1000),
-        sessionId: active.id,
-      })
-        .then((id) => manager.attachHistoryId(active.id, id))
-        .catch((err) => console.error("history_insert failed", err));
-
-      active.terminal.send(command + "\r").catch((err) =>
-        console.error("send command failed", err),
-      );
+      submitCommand(active, command);
     },
     onInterrupt: () => {
       manager.active?.terminal.send("\x03").catch(() => {});
@@ -159,18 +167,19 @@ async function boot(mounts: Mounts): Promise<void> {
 
   // Close the block on command end for the session that emitted it. We
   // subscribe inside the manager at session-create time; here we only
-  // need to handle the history row update and the visual block-end write.
-  // SessionManager fires `session-updated` when running flips false, but
-  // writing the block-end separator belongs here (it knows about history
-  // row updates). So subscribe to the raw TerminalHandle events per session
-  // via the onSessionAdded event.
+  // need to handle the history row update, the visual block-end write,
+  // and capturing the command's output (for AI explain flows).
   manager.onSessionAdded((s) => {
     s.terminal.onCommandEnd((exitCode) => {
       const open = s.state.openCommand;
       const durationMs = open
         ? Math.round(performance.now() - open.startedAt)
         : 0;
-      s.terminal.writeBlockEnd(exitCode, open ? durationMs : null);
+      const captured = s.terminal.writeBlockEnd(
+        exitCode,
+        open ? durationMs : null,
+      );
+      s.state.lastOutput = captured || null;
       if (open && open.historyId !== null) {
         invoke("history_update_exit", {
           id: open.historyId,
@@ -189,6 +198,55 @@ async function boot(mounts: Mounts): Promise<void> {
     newBtn: mounts.newBtn,
     searchInput: mounts.sidebarSearch,
     manager,
+  });
+
+  // --- AI panel --------------------------------------------------------
+  //
+  // Availability check gates the keybindings: if `claude` isn't on PATH
+  // we leave the shortcuts unbound rather than opening a broken panel.
+  // The check is cached — one invocation at startup.
+  const aiAvailable = await aiIsAvailable();
+  const aiPanel = new AiPanel({
+    host: mounts.overlayHost,
+    runCommand: (cmd) => {
+      const active = manager.active;
+      if (!active) return;
+      // Use the full submit path so the block header, history recording,
+      // and PTY send all happen the same way as a user-typed command.
+      submitCommand(active, cmd);
+    },
+    populateEditor: (text) => {
+      editor.setValue(text);
+      editor.focus();
+    },
+    getContext: () => sessionContext(manager.active),
+    getExplainTarget: () => {
+      const s = manager.active;
+      if (!s) return null;
+      // Prefer the last error, but fall back to whatever's in the editor.
+      if (
+        s.state.lastExitCode !== null &&
+        s.state.lastExitCode !== 0 &&
+        s.state.lastCommand
+      ) {
+        return {
+          kind: "error",
+          command: s.state.lastCommand,
+          output: s.state.lastOutput ?? "",
+          exitCode: s.state.lastExitCode,
+        };
+      }
+      const editorText = editor.getValue().trim();
+      if (editorText) {
+        return { kind: "command", command: editorText };
+      }
+      // Last resort: the last successful command, for "explain what I just did".
+      if (s.state.lastCommand) {
+        return { kind: "command", command: s.state.lastCommand };
+      }
+      return null;
+    },
+    focusEditor: () => editor.focus(),
   });
 
   // --- Global keybindings ----------------------------------------------
@@ -234,6 +292,22 @@ async function boot(mounts: Mounts): Promise<void> {
       const delta = ev.key === "]" ? 1 : -1;
       const next = sessions[(curIdx + delta + sessions.length) % sessions.length];
       void manager.switchTo(next.id);
+      return;
+    }
+
+    // ⌘K — open AI panel in command-generation mode.
+    // ⌘⇧E — open AI panel in explain mode (uses last error, falls back to
+    //       editor contents or last command if no error is on record).
+    if (!aiAvailable) return;
+    if (ev.key === "k" && !ev.shiftKey) {
+      ev.preventDefault();
+      if (!aiPanel.isOpen()) void aiPanel.openForCommand();
+      return;
+    }
+    if (ev.shiftKey && ev.key.toLowerCase() === "e") {
+      ev.preventDefault();
+      if (!aiPanel.isOpen()) void aiPanel.openForExplain();
+      return;
     }
   });
 
@@ -252,4 +326,20 @@ function prettifyCwd(cwd: string, home: string | null): string {
   if (home && cwd === home) return "~";
   if (home && cwd.startsWith(home + "/")) return "~" + cwd.slice(home.length);
   return cwd;
+}
+
+/**
+ * Build an AiContext from whatever the active session knows. We skip
+ * filling in `failing_*` fields here — the AI panel does that when the
+ * call is explicitly an "explain the error" request (getExplainTarget).
+ */
+function sessionContext(active: Session | null): AiContext {
+  if (!active) return {};
+  return {
+    cwd: active.state.cwd,
+    git_branch: active.state.branch || null,
+    // Rust-side `enrich()` populates shell + recent_commands from the
+    // history DB before the prompt is built, so we don't need to mirror
+    // that data across IPC here.
+  };
 }

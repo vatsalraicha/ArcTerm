@@ -56,8 +56,14 @@ export interface TerminalHandle {
   getCwd: () => string | null;
   /** Insert a visual block-start separator into the terminal output. */
   writeBlockStart: (command: string) => void;
-  /** Insert a visual block-end separator with exit code + duration. */
-  writeBlockEnd: (exitCode: number | null, durationMs: number | null) => void;
+  /** Insert a visual block-end separator with exit code + duration.
+   *  Returns the text captured between block-start and block-end — this is
+   *  the command's output, which the AI explain flow feeds back to Claude
+   *  for error-explain requests. Length-capped internally. */
+  writeBlockEnd: (
+    exitCode: number | null,
+    durationMs: number | null,
+  ) => string;
   /** Move keyboard focus into xterm (for TUI programs that need direct keys). */
   focus: () => void;
   /** Unique id for this PTY session — stored with history entries. */
@@ -216,6 +222,13 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
     invoke("pty_kill", { id: ptyId }).catch(() => {});
   });
 
+  // Capture state for the currently-open block. We remember the absolute
+  // line index inside xterm's buffer at the moment writeBlockStart runs, so
+  // that writeBlockEnd can slice the lines in between as "command output".
+  // Absolute = `baseY + cursorY`; using absolute indices is buffer-scroll
+  // safe.
+  let blockStartAbs: number | null = null;
+
   // Caller decides who holds focus — typically the InputEditor takes it.
   return {
     send: (data: string) => invoke("pty_write", { id: ptyId, data }),
@@ -227,12 +240,60 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
     onBranchChange: (cb) => branchListeners.add(cb),
     onCommandEnd: (cb) => commandEndListeners.add(cb),
     getCwd: () => currentCwd,
-    writeBlockStart: (command: string) => writeBlockStart(term, command),
-    writeBlockEnd: (exitCode, durationMs) =>
-      writeBlockEnd(term, exitCode, durationMs),
+    writeBlockStart: (command: string) => {
+      writeBlockStart(term, command);
+      // Record one line past where we just wrote, so output capture starts
+      // AFTER our header and concealed-echo lines. The extra +2 skips the
+      // "\r\n" we wrote after the header plus the zle echo line.
+      const buf = term.buffer.active;
+      blockStartAbs = buf.baseY + buf.cursorY + 1;
+    },
+    writeBlockEnd: (exitCode, durationMs) => {
+      // Capture BEFORE writing the footer so our separator lines don't
+      // pollute the output we pass to Claude.
+      const captured = blockStartAbs !== null
+        ? captureBufferRange(term, blockStartAbs, term.buffer.active.baseY + term.buffer.active.cursorY)
+        : "";
+      writeBlockEnd(term, exitCode, durationMs);
+      blockStartAbs = null;
+      return captured;
+    },
     focus: () => term.focus(),
     sessionId: ptyId,
   };
+}
+
+/**
+ * Slice xterm's scrollback between two absolute line indices and return
+ * the raw text. Used to feed failed-command output into the AI explain
+ * flow without needing a separate PTY tee.
+ *
+ * Length-capped at 8 KB so a command that prints megabytes of output
+ * doesn't balloon the prompt we send to Claude. We keep the tail since
+ * the tail is almost always where the real error lives.
+ */
+function captureBufferRange(
+  term: Terminal,
+  startAbs: number,
+  endAbs: number,
+): string {
+  const MAX_BYTES = 8 * 1024;
+  const buf = term.buffer.active;
+  const from = Math.max(0, Math.min(startAbs, endAbs));
+  const to = Math.max(from, endAbs);
+  const lines: string[] = [];
+  for (let y = from; y <= to; y++) {
+    const line = buf.getLine(y);
+    if (!line) continue;
+    // translateToString with trimRight drops the trailing spaces xterm
+    // pads lines with; we pass true to also strip the cursor's empty cell.
+    lines.push(line.translateToString(true));
+  }
+  let out = lines.join("\n").trimEnd();
+  if (out.length > MAX_BYTES) {
+    out = "…[truncated]\n" + out.slice(out.length - MAX_BYTES);
+  }
+  return out;
 }
 
 /**

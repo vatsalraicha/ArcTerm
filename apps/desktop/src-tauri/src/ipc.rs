@@ -5,8 +5,13 @@
 //! independently. Handlers return `Result<T, String>`; the string flows
 //! back to JS as a rejected promise.
 
-use tauri::{AppHandle, State};
+use std::sync::Arc;
 
+use futures::StreamExt;
+use tauri::{AppHandle, Emitter, State};
+use uuid::Uuid;
+
+use crate::ai::{AiChunk, AiContext, AiRequest, AiResponse, AiRouter};
 use crate::history::{Entry, HistoryStore};
 use crate::pty::PtyManager;
 
@@ -91,4 +96,119 @@ pub fn history_autosuggest(
     cwd: Option<String>,
 ) -> Result<Option<String>, String> {
     store.autosuggest(&prefix, cwd.as_deref())
+}
+
+// -- AI commands ---------------------------------------------------------
+//
+// The router state is registered optionally (see lib.rs). When the user has
+// no backend configured at all, these commands fail with a clear error
+// which the frontend translates into "AI features unavailable".
+
+/// Cheap availability check. Backs the frontend's decision to show or hide
+/// the Cmd+K panel / explain buttons. Called during boot and cached.
+#[tauri::command]
+pub async fn ai_is_available(router: State<'_, Arc<AiRouter>>) -> Result<bool, String> {
+    Ok(router.inner().is_available().await)
+}
+
+/// Reveal the active backend's id + display name. Frontend uses this to
+/// label responses ("via Claude") and to pick appropriate UI affordances.
+#[tauri::command]
+pub fn ai_active_backend(
+    router: State<'_, Arc<AiRouter>>,
+) -> Result<serde_json::Value, String> {
+    let b = router.inner().active();
+    Ok(serde_json::json!({
+        "id": b.id(),
+        "display_name": b.display_name(),
+    }))
+}
+
+/// Single-shot ask. Returns the full response when complete. Used by the
+/// Cmd+K "generate command" flow where we need the whole answer before
+/// populating the editor.
+#[tauri::command]
+pub async fn ai_ask(
+    router: State<'_, Arc<AiRouter>>,
+    history: State<'_, HistoryStore>,
+    req: AiRequest,
+) -> Result<AiResponse, String> {
+    let enriched = AiRequest {
+        context: req.context.map(|c| crate::ai::context::enrich(c, Some(history.inner()))),
+        ..req
+    };
+    router.inner().ask(enriched).await
+}
+
+/// Streaming ask. Returns a request id synchronously; chunks arrive on the
+/// `ai://chunk` event with matching `id`. The caller listens until a chunk
+/// with `done: true` lands.
+#[tauri::command]
+pub async fn ai_stream(
+    app: AppHandle,
+    router: State<'_, Arc<AiRouter>>,
+    history: State<'_, HistoryStore>,
+    req: AiRequest,
+) -> Result<String, String> {
+    let id = Uuid::new_v4().to_string();
+    let enriched = AiRequest {
+        context: req.context.map(|c| crate::ai::context::enrich(c, Some(history.inner()))),
+        ..req
+    };
+    let backend = router.inner().active();
+    let stream_id = id.clone();
+
+    // Spawn on the tokio runtime: the backend's stream is async but the
+    // Tauri command handler returns immediately with the id.
+    tokio::spawn(async move {
+        let mut stream = backend.stream(enriched);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(delta) => {
+                    let chunk = AiChunk {
+                        id: stream_id.clone(),
+                        delta,
+                        done: false,
+                        error: None,
+                    };
+                    if let Err(e) = app.emit("ai://chunk", chunk) {
+                        log::warn!("ai://chunk emit failed: {e}");
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = app.emit(
+                        "ai://chunk",
+                        AiChunk {
+                            id: stream_id.clone(),
+                            delta: String::new(),
+                            done: true,
+                            error: Some(err),
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+        // Clean end of stream.
+        let _ = app.emit(
+            "ai://chunk",
+            AiChunk {
+                id: stream_id,
+                delta: String::new(),
+                done: true,
+                error: None,
+            },
+        );
+    });
+
+    Ok(id)
+}
+
+// Provide a way to construct an empty context from the frontend when the
+// caller only wants to send a raw question. Not a command — used inside
+// the ai_ask path as a default.
+#[allow(dead_code)]
+pub fn empty_context() -> AiContext {
+    AiContext::default()
 }

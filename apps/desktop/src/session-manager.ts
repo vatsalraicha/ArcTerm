@@ -47,6 +47,11 @@ export interface SessionState {
         historyId: number | null;
         startedAt: number;
     } | null;
+    /** Captured output of the most recent command (both stdout and stderr).
+     *  Populated by main.ts from writeBlockEnd's return value. Used by the
+     *  AI explain flow to show Claude what actually failed. Capped at ~8 KB.
+     *  Null until a command has finished in this session. */
+    lastOutput: string | null;
 }
 
 export interface Session {
@@ -178,6 +183,7 @@ export class SessionManager {
                 running: false,
                 runStartedAt: null,
                 openCommand: null,
+                lastOutput: null,
             },
         };
         this.sessions.set(session.id, session);
