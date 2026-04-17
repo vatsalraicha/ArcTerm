@@ -26,6 +26,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { setupTerminal, type TerminalHandle, type ThemeName } from "./terminal";
+import { writeWelcome } from "./welcome";
 
 export interface SessionState {
     /** User-facing name. Starts as "Session N"; user can rename via sidebar. */
@@ -185,6 +186,12 @@ export class SessionManager {
             frame.remove();
             throw err;
         }
+
+        // Welcome banner: printed into the xterm buffer BEFORE the shell
+        // gets a chance to draw anything. It scrolls naturally out of view
+        // the moment the user runs a command, so we never have to manage
+        // visibility ourselves.
+        writeWelcome(terminal);
 
         const ordinal = this.nextOrdinal++;
         const session: Session = {
