@@ -1,0 +1,184 @@
+/*
+ * Settings panel. Shares the modal scrim + centered-card pattern with
+ * the history overlay and AI panel, differentiated by header + form.
+ */
+
+.arcterm-settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 120; /* above AI panel (110) + history overlay (100) */
+  outline: none;
+}
+
+.arcterm-settings-overlay.hidden {
+  display: none;
+}
+
+.arcterm-settings-card {
+  width: min(640px, 100%);
+  max-height: 80vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: arcterm-settings-in 160ms ease-out;
+}
+
+@keyframes arcterm-settings-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.arcterm-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.arcterm-settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.arcterm-settings-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.arcterm-settings-close:hover {
+  color: var(--error);
+}
+
+.arcterm-settings-form {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.arcterm-settings-section {
+  margin-bottom: 18px;
+}
+
+.arcterm-settings-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.arcterm-settings-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.arcterm-settings-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+  padding: 4px 0;
+}
+
+.arcterm-settings-radio input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.arcterm-settings-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.arcterm-settings-control select,
+.arcterm-settings-control input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.arcterm-settings-control select:focus,
+.arcterm-settings-control input:focus {
+  border-color: var(--accent);
+}
+
+.arcterm-settings-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.arcterm-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.arcterm-settings-btn {
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.arcterm-settings-btn.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 1px solid var(--accent);
+  font-weight: 600;
+}
+
+.arcterm-settings-btn.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.arcterm-settings-btn.ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.arcterm-settings-status {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  min-height: 18px;
+}
+
+.arcterm-settings-error {
+  padding: 16px;
+  color: var(--error);
+  font-size: 13px;
+}

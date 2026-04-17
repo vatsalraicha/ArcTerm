@@ -25,6 +25,7 @@ import {
   registerThemeApplier,
   runInternalCommand,
 } from "./arcterm-commands";
+import { SettingsPanel } from "./settings-panel";
 import type { ThemeName } from "./terminal";
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -319,6 +320,17 @@ async function boot(mounts: Mounts): Promise<void> {
     });
   });
 
+  // --- Settings panel --------------------------------------------------
+  // Triggered by ⌘, (standard macOS convention). Lets the user flip
+  // theme + AI mode + local model + Claude path from one form instead
+  // of memorizing three slash-commands. Save is live-apply: theme flips
+  // immediately, router swaps mode immediately, rest persists.
+  const settingsPanel = new SettingsPanel({
+    host: mounts.overlayHost,
+    applyTheme: (next) => applyTheme(next, manager),
+    focusEditor: () => editor.focus(),
+  });
+
   // --- Sidebar ---------------------------------------------------------
   const sidebar = new Sidebar({
     root: mounts.sidebarRoot,
@@ -420,6 +432,14 @@ async function boot(mounts: Mounts): Promise<void> {
       const delta = ev.key === "]" ? 1 : -1;
       const next = sessions[(curIdx + delta + sessions.length) % sessions.length];
       void manager.switchTo(next.id);
+      return;
+    }
+
+    // ⌘, — open settings panel. macOS convention; available regardless
+    // of AI availability.
+    if (ev.key === "," && !ev.shiftKey) {
+      ev.preventDefault();
+      if (!settingsPanel.isOpen()) void settingsPanel.open();
       return;
     }
 

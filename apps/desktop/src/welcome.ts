@@ -36,6 +36,7 @@ export function writeWelcome(handle: TerminalHandle): void {
         ["⌘1 – ⌘9", "Switch to session N"],
         ["↑ / Ctrl+R", "Browse / search command history"],
         ["Tab", "Complete path / subcommand / option"],
+        ["⌘,", "Open settings"],
         ["/arcterm-help", "List ArcTerm slash-commands"],
     ];
 
