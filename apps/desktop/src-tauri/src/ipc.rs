@@ -327,6 +327,65 @@ pub async fn model_delete(
 
 // -- Router mode switching ---------------------------------------------
 
+/// Load a specific local model into the router, replacing any previously-
+/// loaded one. Idempotent: if the requested model is already loaded, just
+/// update the settings pin and return. The settings panel calls this
+/// whenever its "Local model" dropdown changes; writing to
+/// settings.ai.localModel alone isn't enough because that only influences
+/// the NEXT boot — the in-memory router still has the old backend.
+///
+/// Error surface: clear messages for "unknown id" and "not downloaded"
+/// so the UI can hint at the fix (run /arcterm-download <id>) instead of
+/// showing a generic load failure.
+#[tauri::command]
+pub async fn ai_set_local_model(
+    router: State<'_, std::sync::Arc<AiRouter>>,
+    store: State<'_, std::sync::Arc<SettingsStore>>,
+    id: String,
+) -> Result<(), String> {
+    let spec = models::find(&id)
+        .ok_or_else(|| format!("unknown model id: {id}"))?;
+    if !spec.is_installed() {
+        return Err(format!(
+            "Model '{id}' is not downloaded. Run /arcterm-download {id} first."
+        ));
+    }
+
+    // Fast-path: same model already loaded → no-op except for persistence.
+    if let Some(current) = router.inner().local_backend() {
+        if let Some(current_spec) = current.model_spec() {
+            if current_spec.id == id {
+                let id_clone = id.clone();
+                store.inner().update(move |s| s.ai.local_model = id_clone)?;
+                return Ok(());
+            }
+        }
+    }
+
+    let path = spec
+        .local_path()
+        .ok_or_else(|| "model path unavailable".to_string())?;
+    log::info!(
+        "swapping local model: id={} path={}",
+        spec.id,
+        path.display()
+    );
+    let loaded = tokio::task::spawn_blocking(move || {
+        crate::ai::local_llama::LocalLlamaBackend::load(path)
+    })
+    .await
+    .map_err(|e| format!("load join: {e}"))?
+    .map_err(|e| format!("local model load: {e}"))?;
+    // install_local with switch_to_auto=false: preserve whatever mode
+    // the user had; they're changing the backend, not the mode.
+    router
+        .inner()
+        .install_local(std::sync::Arc::new(loaded), false)?;
+    let id_clone = id.clone();
+    store.inner().update(move |s| s.ai.local_model = id_clone)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn ai_set_mode(
     router: State<'_, std::sync::Arc<AiRouter>>,

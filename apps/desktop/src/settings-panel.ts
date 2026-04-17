@@ -256,14 +256,31 @@ export class SettingsPanel {
             };
             await invoke("settings_set", { settings: next });
 
-            // Apply live changes. Mode swap via the dedicated IPC so the
-            // router rebuilds its active backend without a restart.
+            // Apply live changes. Order matters:
+            //   1. Swap the local model FIRST if the user picked a new
+            //      one; that writes into the router synchronously (once
+            //      the Metal shaders finish) so step 2 can observe it.
+            //   2. Set the mode, which may use the freshly-loaded model.
+            // Persisting the mode via step 2 also re-saves localModel as
+            // a side-effect (ai_set_local_model already did), but
+            // idempotent writes are fine.
+            let loadWarning: string | null = null;
+            if (localModel) {
+                try {
+                    await invoke("ai_set_local_model", { id: localModel });
+                } catch (err) {
+                    loadWarning = `Model load: ${String(err)}`;
+                }
+            }
             try {
                 await invoke("ai_set_mode", { mode: aiMode });
             } catch (err) {
                 // Mode mismatch (e.g. local requested but no model) —
                 // show but keep other saves.
                 this.statusEl.textContent = `Saved. AI mode warning: ${String(err)}`;
+            }
+            if (loadWarning) {
+                this.statusEl.textContent = `Saved. ${loadWarning}`;
             }
             this.opts.applyTheme(theme === "light" ? "light" : "dark");
             if (!this.statusEl.textContent) {

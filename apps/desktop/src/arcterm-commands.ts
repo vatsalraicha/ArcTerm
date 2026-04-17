@@ -132,6 +132,9 @@ export async function runInternalCommand(
             case "arcterm-theme":
                 await cmdTheme(session, args);
                 break;
+            case "arcterm-load":
+                await cmdLoad(session, args);
+                break;
             default:
                 writeError(session, `Unknown command: ${name}`);
                 writeLine(
@@ -156,6 +159,7 @@ function writeHelp(session: Session): void {
         ["/arcterm-model [claude|local|auto]", "show or set AI backend"],
         ["/arcterm-models", "list available local models"],
         ["/arcterm-download <id>", "download a model from the registry"],
+        ["/arcterm-load <id>", "load a different installed model into memory"],
         ["/arcterm-theme [dark|light]", "show or set UI theme"],
         ["/arcterm-status", "show current AI router state"],
     ];
@@ -318,6 +322,36 @@ async function cmdTheme(session: Session, args: string[]): Promise<void> {
     await invoke("settings_set", { settings: { ...full, theme: next } });
     themeApplier(next);
     writeLine(session, `\x1b[32mTheme switched to \x1b[1m${next}\x1b[0m.`);
+}
+
+/**
+ * /arcterm-load <id> — swap the active local model without changing the
+ * AI backend mode. Useful for A/B'ing quantizations (e.g. flip between
+ * Q4_K_M and Q8_0 to compare answer quality) without touching Claude/auto
+ * settings. Prints a tiny progress line while the new model's Metal
+ * shaders compile (typically a few seconds the first time).
+ */
+async function cmdLoad(session: Session, args: string[]): Promise<void> {
+    if (args.length === 0) {
+        writeLine(session, "Usage: /arcterm-load <model-id>");
+        writeLine(session, "Run /arcterm-models to see available ids.");
+        return;
+    }
+    const id = args[0];
+    writeLine(
+        session,
+        `Loading \x1b[36m${id}\x1b[0m… \x1b[2m(Metal shader compile is slow on first load)\x1b[0m`,
+    );
+    try {
+        await invoke("ai_set_local_model", { id });
+        const status = await invoke<AiStatus>("ai_status");
+        writeLine(
+            session,
+            `\x1b[32mLoaded.\x1b[0m ${formatLocalModel(status)}`,
+        );
+    } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err));
+    }
 }
 
 async function cmdStatus(session: Session): Promise<void> {

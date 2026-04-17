@@ -236,6 +236,7 @@ pub fn run() {
             ipc::ai_ask,
             ipc::ai_stream,
             ipc::ai_set_mode,
+            ipc::ai_set_local_model,
             ipc::ai_status,
             ipc::settings_get,
             ipc::settings_set,
