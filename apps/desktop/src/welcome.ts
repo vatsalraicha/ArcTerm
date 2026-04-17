@@ -30,11 +30,12 @@ export function writeWelcome(handle: TerminalHandle): void {
 
     const rows: Array<[string, string]> = [
         ["⌘K", "Ask AI to write a command"],
+        ["? <query>", "AI shortcut — type in the input, hit Enter"],
         ["⌘⇧E", "Explain the last error (or current input)"],
         ["⌘T / ⌘W", "New session / close session"],
         ["⌘1 – ⌘9", "Switch to session N"],
         ["↑ / Ctrl+R", "Browse / search command history"],
-        ["Tab", "Complete path"],
+        ["Tab", "Complete path / subcommand / option"],
         ["/arcterm-help", "List ArcTerm slash-commands"],
     ];
 
