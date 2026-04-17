@@ -64,14 +64,31 @@ pub fn run() {
     let initial_settings = settings.get();
     let desired_mode = Mode::parse(&initial_settings.ai.mode).unwrap_or(Mode::Auto);
 
-    // Local backend: try to load the configured GGUF if it's on disk.
-    // Loading is expensive (a few hundred ms), so we skip when the user
-    // is in "claude" mode — they'll pay the cost only when they switch.
-    // Loading failures degrade to None (no local backend available).
+    // Local backend: try to load a GGUF at boot. Three-tier resolution:
+    //   1. The exact id pinned in settings.ai.localModel (user's choice).
+    //   2. If that isn't installed, any installed registry entry (so
+    //      someone who downloaded IQ2_M but still has "q4km" pinned in
+    //      their config still gets a working local backend).
+    //   3. If nothing is installed, None — Claude mode is still fine.
+    //
+    // We only pay the load cost when the mode needs local (Local/Auto).
+    // Claude-only users get fast boot even with a 3 GB GGUF on disk.
     let local_backend: Option<Arc<LocalLlamaBackend>> =
         if matches!(desired_mode, Mode::Local | Mode::Auto) {
-            match models::find(&initial_settings.ai.local_model) {
-                Some(spec) if spec.is_installed() => {
+            let pinned = models::find(&initial_settings.ai.local_model)
+                .filter(|spec| spec.is_installed());
+            let fallback = pinned.or_else(|| {
+                models::REGISTRY.iter().find(|s| s.is_installed())
+            });
+            match fallback {
+                Some(spec) => {
+                    log::info!(
+                        "loading local model at boot: id={} path={}",
+                        spec.id,
+                        spec.local_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                    );
                     let path = spec.local_path().unwrap();
                     match LocalLlamaBackend::load(path) {
                         Ok(b) => Some(Arc::new(b)),
@@ -81,7 +98,7 @@ pub fn run() {
                         }
                     }
                 }
-                _ => None,
+                None => None,
             }
         } else {
             None

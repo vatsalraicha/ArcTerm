@@ -245,6 +245,7 @@ pub fn model_list() -> Vec<ModelInfo> {
 pub async fn model_download(
     app: AppHandle,
     router: State<'_, std::sync::Arc<AiRouter>>,
+    settings: State<'_, std::sync::Arc<SettingsStore>>,
     download_lock: State<'_, std::sync::Arc<downloader::DownloadLock>>,
     id: String,
 ) -> Result<(), String> {
@@ -273,7 +274,7 @@ pub async fn model_download(
     // it on a blocking thread to keep the Tauri async runtime free.
     if let Ok(path) = &result {
         let path = PathBuf::from(path);
-        let router = router.inner().clone();
+        let router_arc = router.inner().clone();
         let load_result = tokio::task::spawn_blocking(move || {
             crate::ai::local_llama::LocalLlamaBackend::load(path)
         })
@@ -284,7 +285,19 @@ pub async fn model_download(
             Ok(backend) => {
                 // Switch mode to Auto so the newly-available local model
                 // actually gets used in the absence of Claude.
-                let _ = router.install_local(std::sync::Arc::new(backend), true);
+                let _ = router_arc.install_local(std::sync::Arc::new(backend), true);
+                // Persist the model id AND the mode switch to auto so the
+                // next app boot reloads THIS variant and actually uses it.
+                // Without the mode persist, lib.rs's Claude-mode fast-boot
+                // skips local loading entirely and /arcterm-model local
+                // errors after restart. The in-memory install_local above
+                // already flipped the runtime mode — we just mirror it to
+                // disk here.
+                let id_for_persist = id.clone();
+                let _ = settings.inner().update(move |s| {
+                    s.ai.local_model = id_for_persist;
+                    s.ai.mode = "auto".to_string();
+                });
             }
             Err(e) => {
                 log::warn!("model downloaded but load failed: {e}");
