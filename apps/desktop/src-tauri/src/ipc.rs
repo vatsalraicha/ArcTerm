@@ -328,12 +328,56 @@ pub async fn model_delete(
 // -- Router mode switching ---------------------------------------------
 
 #[tauri::command]
-pub fn ai_set_mode(
+pub async fn ai_set_mode(
     router: State<'_, std::sync::Arc<AiRouter>>,
     store: State<'_, std::sync::Arc<SettingsStore>>,
     mode: String,
 ) -> Result<(), String> {
     let parsed = Mode::parse(&mode)?;
+
+    // Lazy-load a local model when switching to Local / Auto.
+    //
+    // Boot only loads a local model if settings.ai.mode at launch time
+    // was Local or Auto — so a user who boots in Claude mode, installs
+    // a GGUF via /arcterm-download, then switches to Local would hit
+    // "no local model loaded" despite having one on disk. Load on
+    // demand here: prefer the pinned id, fall back to any installed
+    // entry, surface a clear error only if truly nothing is installed.
+    //
+    // Loading a 3-8 GB GGUF + compiling Metal shaders is slow; we
+    // spawn_blocking so the Tauri event loop stays responsive and the
+    // user sees the "thinking" of the UI during load instead of a
+    // frozen window.
+    if matches!(parsed, Mode::Local | Mode::Auto) && !router.inner().local_available() {
+        let pinned_id = store.inner().get().ai.local_model;
+        let spec = models::find(&pinned_id)
+            .filter(|s| s.is_installed())
+            .or_else(|| models::REGISTRY.iter().find(|s| s.is_installed()))
+            .ok_or_else(|| {
+                "No local model installed. Run `/arcterm-download gemma` first.".to_string()
+            })?;
+        let path = spec
+            .local_path()
+            .ok_or_else(|| "model path unavailable".to_string())?;
+        log::info!("lazy-loading local model: id={} path={}", spec.id, path.display());
+        let loaded = tokio::task::spawn_blocking(move || {
+            crate::ai::local_llama::LocalLlamaBackend::load(path)
+        })
+        .await
+        .map_err(|e| format!("load join: {e}"))?
+        .map_err(|e| format!("local model load: {e}"))?;
+        // install_local with switch_to_auto=false: we'll call set_mode
+        // explicitly below with the user's chosen mode.
+        router
+            .inner()
+            .install_local(std::sync::Arc::new(loaded), false)?;
+        // Also update settings to reflect which variant we loaded — so
+        // next boot eagerly loads this one instead of the (possibly
+        // stale) pinned default.
+        let resolved_id = spec.id.to_string();
+        store.inner().update(move |s| s.ai.local_model = resolved_id)?;
+    }
+
     router.inner().set_mode(parsed)?;
     // Persist so the choice survives relaunch.
     store.inner().update(|s| s.ai.mode = parsed.as_str().to_string())?;
