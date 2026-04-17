@@ -40,15 +40,33 @@ _arcterm_emit_cwd() {
     printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "${path}"
 }
 
-# --- 3. Block end marker: OSC 133;D;<exit> -----------------------------------
+# --- 3. Block-start / block-end markers -------------------------------------
 # OSC 133 is the FinalTerm / iTerm shell-integration contract used by
-# Warp, WezTerm, kitty, iTerm2 and VSCode. We only emit ";D" because
-# ArcTerm decides "block start" itself when the user presses Enter — we
-# don't need ";A" ";B" ";C" markers. `$?` is the most recently finished
-# command's exit code and is only meaningful at precmd time.
+# Warp, WezTerm, kitty, iTerm2 and VSCode.
+#
+# We emit two markers:
+#
+#   ;C  — fired from preexec, right after zle has echoed the user's command
+#         back to the terminal but before the command actually runs. ArcTerm
+#         uses this as the moment to un-conceal: writeBlockStart paints the
+#         styled "❯ <command>" header and then sets the foreground color to
+#         match the background, making zle's duplicate echo invisible. The
+#         \e[0m emitted here undoes that conceal so the real command output
+#         renders normally.
+#
+#   ;D;<exit> — fired from precmd after each command finishes. Payload is
+#         the exit status; ArcTerm uses it to close the block and update
+#         the history row.
+#
+# The \e[0m prefix on ;D is belt + suspenders in case preexec was skipped
+# (e.g. the user pressed Ctrl+C between zle read and preexec firing).
+_arcterm_mark_command_executed() {
+    printf '\e]133;C\a\e[0m'
+}
+
 _arcterm_emit_block_end() {
     local exit_code=$?
-    printf '\e]133;D;%d\a' "${exit_code}"
+    printf '\e[0m\e]133;D;%d\a' "${exit_code}"
     return ${exit_code}
 }
 
@@ -71,10 +89,15 @@ autoload -Uz add-zsh-hook
 # precmd runs right before each new prompt (i.e. after a command finishes,
 # or at the very start of the shell). Order matters: block-end captures $?
 # before any other hook could stomp on it, so run it first.
-add-zsh-hook precmd _arcterm_emit_block_end
-add-zsh-hook precmd _arcterm_suppress_prompt
-add-zsh-hook precmd _arcterm_emit_branch
-add-zsh-hook chpwd  _arcterm_emit_cwd
+#
+# preexec runs AFTER zle reads the line (and echoes it to the terminal) but
+# BEFORE the command executes. It's the right moment to un-conceal zle's
+# echo so the actual command output renders normally.
+add-zsh-hook precmd  _arcterm_emit_block_end
+add-zsh-hook precmd  _arcterm_suppress_prompt
+add-zsh-hook precmd  _arcterm_emit_branch
+add-zsh-hook preexec _arcterm_mark_command_executed
+add-zsh-hook chpwd   _arcterm_emit_cwd
 
 # Emit initial state so ArcTerm's prompt bar is correct from the first
 # keystroke, not just after the user cd's somewhere.

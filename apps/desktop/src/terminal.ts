@@ -236,26 +236,38 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
 }
 
 /**
- * Render a block-start separator directly into the xterm buffer. This is
- * visual only — the actual command gets sent to the PTY separately. We
- * print the prompt-like header ourselves rather than waiting for the shell
- * to echo it, because our shell integration suppresses the shell's prompt
- * entirely.
+ * Render a block-start separator directly into the xterm buffer and
+ * *conceal* the duplicate command echo that zsh's line editor is about to
+ * emit.
  *
- * Format:
- *   (blank line)
- *   ❯ <command>
- *   (blank line after shell output; closed by writeBlockEnd)
+ * The problem: when we send `command + "\r"` to the PTY, zsh's zle reads
+ * the bytes and echoes them character-by-character back through the PTY.
+ * Without our hook, the terminal shows:
  *
- * ANSI codes: dim blue sigil, bright white command.
+ *     ❯ python --version     <- our styled header (written here)
+ *     python --version       <- zsh's zle echo (duplicate)
+ *     <output>
+ *
+ * The fix: right after writing the header we set the foreground color to
+ * match the terminal background. zle's echo still arrives but is visually
+ * invisible. The shell's preexec hook (arcterm.zsh) emits OSC 133;C
+ * followed by \e[0m just before executing the real command, which resets
+ * the color in time for output to render normally.
+ *
+ * If preexec doesn't fire (user interrupts before execution, non-zsh shell,
+ * script files with shell hooks missing) the \e[0m in precmd's ;D marker
+ * is our second line of defense. In the pathological case where neither
+ * runs, the user sees nothing for the next output; they can type `\e[0m`
+ * (echo) to recover — but this is vanishingly unlikely in practice.
  */
 function writeBlockStart(term: Terminal, command: string): void {
-  // \r\n pair because the PTY uses \r\n line endings; xterm's cursor is
-  // wherever the last output left it, so start with \r\n to drop to a
-  // guaranteed fresh line before the block header.
   const sigil = "\x1b[38;2;79;195;247m❯\x1b[0m"; // accent blue
   const cmdLine = `\x1b[1;97m${command}\x1b[0m`; // bold white
-  term.write(`\r\n${sigil} ${cmdLine}\r\n`);
+  // Conceal-via-color: set fg to the terminal bg (#1a1a2e). We use 24-bit
+  // truecolor SGR so it matches regardless of palette quirks. Reset comes
+  // from the shell's preexec hook (OSC 133;C + \e[0m in arcterm.zsh).
+  const concealFg = "\x1b[38;2;26;26;46m";
+  term.write(`\r\n${sigil} ${cmdLine}\r\n${concealFg}`);
 }
 
 /**
