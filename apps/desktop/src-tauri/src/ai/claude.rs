@@ -23,7 +23,8 @@ use std::process::Stdio;
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -96,24 +97,18 @@ impl AiBackend for ClaudeCliBackend {
         // stdout first and prefer its message. Only fall back to the raw
         // status + stderr if stdout isn't parseable (CLI not installed,
         // killed by signal, etc).
-        #[derive(Deserialize)]
+        //
+        // `api_error_status` comes across as an int when HTTP failed (401,
+        // 429, 500) and as a null on success. We custom-deserialize it to
+        // a display-friendly string regardless of shape.
+        #[derive(Deserialize, Default)]
         #[serde(default)]
         struct Envelope {
             result: String,
             is_error: bool,
-            #[serde(rename = "api_error_status")]
+            #[serde(deserialize_with = "de_flexible_string")]
             api_error_status: Option<String>,
             subtype: Option<String>,
-        }
-        impl Default for Envelope {
-            fn default() -> Self {
-                Self {
-                    result: String::new(),
-                    is_error: false,
-                    api_error_status: None,
-                    subtype: None,
-                }
-            }
         }
 
         match serde_json::from_str::<Envelope>(stdout.trim()) {
@@ -250,17 +245,52 @@ impl AiBackend for ClaudeCliBackend {
 }
 
 /// Build the `base` command: binary + env sanitation. The key reason this
-/// is factored out is ANTHROPIC_API_KEY removal — if the user has it set,
-/// the CLI bills their Anthropic account instead of their Pro/Max sub.
+/// is factored out is Anthropic auth env scrubbing — if the user has stale
+/// credentials in any of several vars, the CLI will pick them up and
+/// override their logged-in session (→ 401 with "Invalid authentication
+/// credentials"). The session stored in ~/.claude wins only when these
+/// are all unset.
 fn base_command(binary: &str) -> Command {
     let mut cmd = Command::new(binary);
-    // Anthropic CLI picks up ANTHROPIC_API_KEY and switches to API
-    // billing. Users with Pro/Max subscriptions want the subscription
-    // path. Remove it for our subprocess; the user's login session is
-    // preserved in ~/.config/claude (per CLI defaults).
-    cmd.env_remove("ANTHROPIC_API_KEY");
+    // Every auth-relevant Anthropic/Claude env var we know of. Being
+    // aggressive here costs nothing (the subscription path doesn't need
+    // any of these) and fixes a whole class of "works in my terminal but
+    // not in ArcTerm" reports from users who have stale tokens lurking
+    // in their .zshrc/.zshenv.
+    for var in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_TOKEN",
+        "ANTHROPIC_SESSION_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        cmd.env_remove(var);
+    }
     cmd.stdin(Stdio::null());
     cmd
+}
+
+/// Parse a JSON value that may arrive as a string, a number, a bool, or
+/// null, and render it as `Option<String>` for display. Used for the
+/// CLI's `api_error_status` field (int on error, null on success).
+fn de_flexible_string<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(d)?;
+    Ok(match v {
+        Value::Null => None,
+        Value::String(s) if s.is_empty() => None,
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        // Arrays/objects are unlikely here; if they happen we render as
+        // JSON so at least the user sees something meaningful.
+        other => Some(other.to_string()),
+    })
 }
 
 /// Combine the structured request into the final prompt text. We prefix
