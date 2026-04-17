@@ -151,6 +151,18 @@ export class InputEditor {
     }
 
     private readonly onKeyDown = (ev: KeyboardEvent): void => {
+        // --- Completion dropdown: ALWAYS gets first dibs on keys ---
+        //
+        // Must run before the Enter / Tab / Arrow handlers below, otherwise
+        // Enter while the dropdown is open submits the un-completed text
+        // to the shell (the user-reported "conda -<Tab> + select + Enter
+        // sent literal `conda -` to the shell" bug). The dropdown's
+        // handleKey() returns false when it's closed, so non-dropdown
+        // keystrokes fall through to the regular editor handlers below.
+        if (this.opts.completionHandlesKey?.(ev)) {
+            return;
+        }
+
         // --- Submission keys ---
         if (ev.key === "Enter") {
             if (ev.shiftKey) {
@@ -188,14 +200,6 @@ export class InputEditor {
         if (ev.ctrlKey && !ev.metaKey && !ev.altKey && ev.key === "r") {
             ev.preventDefault();
             this.opts.onSearchHistory?.();
-            return;
-        }
-
-        // --- Completion dropdown: route nav keys first ---
-        // If an open dropdown exists, ↑/↓/Enter/Tab/Esc belong to it.
-        if (this.opts.completionHandlesKey?.(ev)) {
-            // Consumed — but we don't return yet; the dropdown's commit
-            // handler will splice into us. Suppress further handling.
             return;
         }
 
@@ -443,29 +447,28 @@ export class InputEditor {
             return;
         }
 
-        // Common-prefix optimization: if every match shares a longer prefix
-        // than what the user typed, fill that in silently. Matches zsh's
-        // "partial-word expansion" behavior — feels natural.
+        // Common-prefix optimization (zsh's "partial-word expansion"): if
+        // every match shares a longer prefix than what the user typed,
+        // fill it in silently before opening the dropdown.
+        //
+        // The Rust side returns FULL replacements that already include
+        // any directory prefix the user typed (e.g. "Code/Apple/ArcTerm/apps/",
+        // not just "apps/"). So `common` IS the entire shared prefix —
+        // we compare it to the entire typed token and replace if it's
+        // longer. An earlier version of this code prepended a separate
+        // `dirPart` on top of `common`, which doubled the path when the
+        // user had already typed a complete directory ("cd Code/Apple/ArcTerm/"
+        // + Tab → "cd Code/Apple/ArcTerm/Code/Apple/ArcTerm/").
         const common = commonPrefix(result.completions.map((c) => c.replacement));
         const typed = text.slice(
             byteToCharIndex(text, result.tokenStart),
             byteToCharIndex(text, result.tokenEnd),
         );
-        const typedBase = lastPathSegment(typed);
-        if (common.length > typedBase.length) {
-            // Splice only the "token dir + common prefix", then open the
-            // dropdown so the user can pick the final entry.
-            const token = text.slice(
-                byteToCharIndex(text, result.tokenStart),
-                byteToCharIndex(text, result.tokenEnd),
-            );
-            const dirEnd = token.lastIndexOf("/");
-            const dirPart = dirEnd >= 0 ? token.slice(0, dirEnd + 1) : "";
-            const expanded = dirPart + common;
+        if (common.length > typed.length && common.startsWith(typed)) {
             this.applyCompletion(
                 result.tokenStart,
                 result.tokenEnd,
-                expanded,
+                common,
                 /* keepDropdownOpen */ true,
             );
         }
@@ -576,12 +579,6 @@ function commonPrefix(items: string[]): string {
         prefix = prefix.slice(0, j);
     }
     return prefix;
-}
-
-/** Last segment of a slash-separated path token. */
-function lastPathSegment(s: string): string {
-    const i = s.lastIndexOf("/");
-    return i < 0 ? s : s.slice(i + 1);
 }
 
 /**
