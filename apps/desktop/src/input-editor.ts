@@ -203,10 +203,18 @@ export class InputEditor {
             return;
         }
 
-        // --- Tab: accept autosuggestion, else try filesystem completion ---
+        // --- Tab: always open completion (FS paths + Fig subcommand specs) ---
+        //
+        // Earlier this first checked for a history-autosuggestion ghost
+        // and accepted it, but that blocked Tab from ever reaching the
+        // subcommand/option dropdown — which is the thing users actually
+        // want when they type `git<Tab>`. Accept-ghost now lives only on
+        // the `→` (right arrow) path, matching zsh-autosuggestions +
+        // zsh-tab-completion convention. runCompletion's getValue()
+        // strips the ghost from its input, so the in-flight ghost doesn't
+        // pollute what we send to fs_complete.
         if (ev.key === "Tab") {
             ev.preventDefault();
-            if (this.acceptGhost()) return;
             this.runCompletion();
             return;
         }
