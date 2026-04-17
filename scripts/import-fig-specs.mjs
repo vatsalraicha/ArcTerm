@@ -33,65 +33,12 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const FIG_SRC = path.join(REPO_ROOT, ".fig-autocomplete-source/src");
 const OUT_DIR = path.join(REPO_ROOT, "apps/desktop/src-tauri/completion-specs");
 
-// Subset of commands we ship by default. Covers the CLIs most users
-// actually tab-complete repeatedly. We keep the allowlist explicit to
-// bound binary size — the full Fig set (735 commands) compiles to several
-// MB of JSON, most of which users would never touch. Extend by editing
-// this list; re-run the importer.
-//
-// Use the base command name (no .ts extension). Nested @scope/tool
-// specs under `.fig-autocomplete-source/src/@scope/` can be added as
-// "@scope/tool" entries.
-const ALLOWLIST = [
-    "git",
-    "brew",
-    "npm",
-    "pnpm",
-    "yarn",
-    "docker",
-    "kubectl",
-    "cargo",
-    "rustc",
-    "rustup",
-    "gh",
-    "claude",
-    "node",
-    "pip",
-    "pip3",
-    "conda",
-    "python",
-    "python3",
-    "curl",
-    "wget",
-    "ssh",
-    "scp",
-    "tmux",
-    "rg",
-    "fd",
-    "bat",
-    "eza",
-    "ls",
-    "grep",
-    "find",
-    "sed",
-    "awk",
-    "tar",
-    "zip",
-    "make",
-    "just",
-    "aws",
-    "gcloud",
-    "az",
-    "terraform",
-    "helm",
-    "ansible",
-    "vim",
-    "nvim",
-    "code",
-    "tauri",
-    "vite",
-    "webpack",
-];
+// How many top-level spec files to import. Set to null to pull the
+// entire withfig/autocomplete set (~735 commands, ~25-30 MB bundle).
+// A non-null ALLOWLIST restores curation if we ever need to bound
+// binary size again. We default to the full set now that the pipeline
+// is stable enough to handle the long tail.
+const ALLOWLIST = null;
 
 async function main() {
     // Sanity check: does the Fig source exist? If not, print a friendly
@@ -109,42 +56,61 @@ async function main() {
 
     await fs.mkdir(OUT_DIR, { recursive: true });
 
-    // Keyed by the canonical command name (first entry of ALLOWLIST).
-    // We could index by every alias, but runtime lookup canonicalizes
-    // the first token anyway; keeping the JSON minimal matters for
-    // binary-size reasons (this file gets include_str!'d in Rust).
+    // Keyed by the canonical command name.
     const index = {};
     let emitted = 0;
     let skipped = 0;
+    let empty = 0;
 
-    for (const name of ALLOWLIST) {
-        const srcFile = path.join(FIG_SRC, `${name}.ts`);
+    // Resolve the list of spec files to import. ALLOWLIST=null => walk
+    // the entire src/ directory; otherwise stick to the hand-picked set.
+    const targets = ALLOWLIST
+        ? ALLOWLIST.map((n) => ({ name: n, srcFile: path.join(FIG_SRC, `${n}.ts`) }))
+        : (await fs.readdir(FIG_SRC))
+              .filter((f) => f.endsWith(".ts") && !f.startsWith("-"))
+              .map((f) => ({
+                  name: f.replace(/\.ts$/, ""),
+                  srcFile: path.join(FIG_SRC, f),
+              }));
+
+    // Quiet log when importing the full tree (>100 files); allowlist mode
+    // still uses the detailed per-entry log so curation stays legible.
+    const verbose = !!ALLOWLIST || targets.length < 100;
+
+    for (const { name, srcFile } of targets) {
         let source;
         try {
             source = await fs.readFile(srcFile, "utf8");
         } catch {
-            console.warn(`  ! no Fig spec for '${name}' (skipping)`);
+            if (verbose) console.warn(`  ! no Fig spec for '${name}' (skipping)`);
             skipped++;
             continue;
         }
 
         const spec = extractSpec(source, srcFile);
         if (!spec) {
-            console.warn(`  ! could not parse '${name}' (skipping)`);
+            if (verbose) console.warn(`  ! could not parse '${name}' (skipping)`);
             skipped++;
             continue;
         }
 
-        // Normalize: Fig uses either `name: "X"` or `name: ["X", "Y"]`.
-        // We always emit `names: [string]` so the Rust side has one
-        // shape to deserialize.
         const normalized = normalizeSpec(spec);
+        const subc = countSubcommands(normalized);
+        const opts = countOptions(normalized);
+
+        // Drop completely-empty specs. They show up occasionally (abandoned
+        // stubs in the Fig repo); keeping them just wastes binary size for
+        // no completion value.
+        if (subc === 0 && opts === 0) {
+            empty++;
+            continue;
+        }
 
         index[name] = normalized;
         emitted++;
-        const subc = countSubcommands(normalized);
-        const opts = countOptions(normalized);
-        console.log(`  ✓ ${name.padEnd(12)} ${subc} subcommands, ${opts} options`);
+        if (verbose) {
+            console.log(`  ✓ ${name.padEnd(14)} ${subc} subcommands, ${opts} options`);
+        }
     }
 
     // One combined bundle — simpler include_str!-based load on the Rust
@@ -155,8 +121,8 @@ async function main() {
 
     const bytes = (await fs.stat(bundlePath)).size;
     console.log(
-        `\nDone: ${emitted} specs emitted, ${skipped} skipped.\n` +
-            `Output: ${bundlePath} (${(bytes / 1024).toFixed(0)} KB)`,
+        `\nDone: ${emitted} specs emitted, ${skipped} skipped, ${empty} empty.\n` +
+            `Output: ${bundlePath} (${(bytes / 1024).toFixed(0)} KB / ${(bytes / 1_048_576).toFixed(1)} MB)`,
     );
 }
 
