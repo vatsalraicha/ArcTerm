@@ -22,8 +22,11 @@
 export interface CompletionItem {
     label: string;
     replacement: string;
-    kind: "dir" | "file" | "executable";
+    kind: "dir" | "file" | "executable" | "subcommand" | "option";
     hidden: boolean;
+    /** Short explanation shown on the right side of the row. Populated
+     *  by spec-based completions; filesystem entries leave it null. */
+    description?: string | null;
 }
 
 export interface CompletionOverlayOptions {
@@ -171,10 +174,7 @@ export class CompletionOverlay {
 
             const icon = document.createElement("span");
             icon.className = "arcterm-completion-icon";
-            icon.textContent =
-                item.kind === "dir" ? "📁"
-                : item.kind === "executable" ? "⚡"
-                : "📄";
+            icon.textContent = iconFor(item.kind);
             icon.setAttribute("aria-hidden", "true");
 
             const label = document.createElement("span");
@@ -183,10 +183,11 @@ export class CompletionOverlay {
 
             const meta = document.createElement("span");
             meta.className = "arcterm-completion-meta";
-            meta.textContent =
-                item.kind === "dir" ? "Directory"
-                : item.kind === "executable" ? "Executable"
-                : "File";
+            // Prefer the Fig-sourced description when present — "Switch
+            // branches or restore files" beats the generic kind label
+            // "Subcommand" every time. Fall back to the kind when no
+            // description was shipped (filesystem paths, bare options).
+            meta.textContent = item.description || kindLabel(item.kind);
 
             row.append(icon, label, meta);
             this.root.append(row);
@@ -230,4 +231,42 @@ export class CompletionOverlay {
         this.selectedIndex = i;
         this.commit();
     };
+}
+
+/**
+ * Map a completion kind to its emoji icon. One place to keep this so
+ * visuals stay consistent across file/dir/subcommand/option sources.
+ */
+function iconFor(kind: CompletionItem["kind"]): string {
+    switch (kind) {
+        case "dir":
+            return "📁";
+        case "executable":
+            return "⚡";
+        case "subcommand":
+            return "▸";
+        case "option":
+            // Flag — kept subtle because option-heavy specs (webpack has
+            // 900+ options) can get visually noisy with a bright icon.
+            return "·";
+        case "file":
+        default:
+            return "📄";
+    }
+}
+
+function kindLabel(kind: CompletionItem["kind"]): string {
+    switch (kind) {
+        case "dir":
+            return "Directory";
+        case "executable":
+            return "Executable";
+        case "subcommand":
+            return "Subcommand";
+        case "option":
+            return "Option";
+        case "file":
+        default:
+            return "File";
+    }
 }

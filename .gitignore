@@ -23,6 +23,11 @@ target/
 Dos_And_Donts.md
 Project_Prompt_Detailed.md
 
+# Fig autocomplete source — cloned at build time by scripts/import-fig-specs.mjs,
+# not vendored. The extracted static JSON lives in apps/desktop/src-tauri/completion-specs/
+# and IS committed (that's what the app actually consumes).
+.fig-autocomplete-source/
+
 # Logs
 *.log
 npm-debug.log*

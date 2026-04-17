@@ -55,8 +55,9 @@ export interface InputEditorOptions {
         completions: Array<{
             label: string;
             replacement: string;
-            kind: "dir" | "file" | "executable";
+            kind: "dir" | "file" | "executable" | "subcommand" | "option";
             hidden: boolean;
+            description?: string | null;
         }>;
     }>;
     /**
@@ -69,8 +70,9 @@ export interface InputEditorOptions {
         items: Array<{
             label: string;
             replacement: string;
-            kind: "dir" | "file" | "executable";
+            kind: "dir" | "file" | "executable" | "subcommand" | "option";
             hidden: boolean;
+            description?: string | null;
         }>,
         onPick: (replacement: string) => void,
     ) => void;

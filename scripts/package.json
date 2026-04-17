@@ -1,0 +1,13 @@
+{
+  "name": "arcterm-scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Build-time helpers for ArcTerm (not shipped in the app)",
+  "scripts": {
+    "import-fig": "node import-fig-specs.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

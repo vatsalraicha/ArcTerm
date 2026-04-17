@@ -23,15 +23,19 @@ use serde::Serialize;
 pub enum CompletionKind {
     Dir,
     File,
-    /// Executable regular file. Useful hint for a future command-completion
-    /// mode; today `fs_complete` only labels — the frontend doesn't care.
+    /// Executable regular file (on the filesystem path).
     Executable,
+    /// A subcommand of a known CLI tool (e.g. `git checkout`). Sourced
+    /// from the command-spec registry, not the filesystem.
+    Subcommand,
+    /// A flag/option of a known CLI tool (e.g. `--verbose`, `-C`).
+    Option,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Completion {
-    /// Display label, e.g. `Apple/` or `terminal.ts`. Trailing slash on
-    /// directories so the user sees at a glance what the entry is.
+    /// Display label, e.g. `Apple/`, `checkout`, or `--verbose`. Trailing
+    /// slash on directories so users see at a glance what the entry is.
     pub label: String,
     /// Bytes to insert into the editor, replacing the trailing token. For
     /// directories this ends with `/` so the user can keep tab-completing
@@ -39,7 +43,14 @@ pub struct Completion {
     pub replacement: String,
     pub kind: CompletionKind,
     /// True when the entry starts with `.` — styled subtly in the UI.
+    #[serde(default)]
     pub hidden: bool,
+    /// Human-readable description, if one was sourced (spec-based
+    /// completions carry a short explanation of each subcommand / flag;
+    /// filesystem completions have none). Shown on the right side of
+    /// the dropdown row.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,6 +221,10 @@ fn list_dir(dir: &Path, base: &str) -> std::io::Result<Vec<Completion>> {
             replacement,
             kind,
             hidden,
+            // Filesystem entries have no description (spec-based
+            // completions do). The dropdown renders "" as an empty
+            // meta cell, which is fine.
+            description: None,
         });
     }
     Ok(out)
