@@ -20,6 +20,7 @@ import { Sidebar } from "./sidebar";
 import { AiPanel, type ExplainTarget } from "./ai-panel";
 import { aiIsAvailable, type AiContext } from "./ai";
 import { CompletionOverlay, type CompletionItem } from "./completion-overlay";
+import { isInternalCommand, runInternalCommand } from "./arcterm-commands";
 
 window.addEventListener("DOMContentLoaded", () => {
   const stackHost = requireEl("terminal-stack");
@@ -156,6 +157,15 @@ async function boot(mounts: Mounts): Promise<void> {
       if (!active) return;
       if (!command.trim()) {
         active.terminal.send("\r").catch(() => {});
+        return;
+      }
+      // ArcTerm internal commands (`/arcterm-*`) are handled in-app: they
+      // don't hit the PTY. We still record them in history via the normal
+      // path so they're discoverable with ↑, but skip the shell roundtrip.
+      if (isInternalCommand(command)) {
+        runInternalCommand(command, active).catch((err) =>
+          console.error("internal command failed", err),
+        );
         return;
       }
       submitCommand(active, command);

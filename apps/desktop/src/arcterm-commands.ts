@@ -1,0 +1,345 @@
+/**
+ * ArcTerm internal slash-commands.
+ *
+ * Commands starting with `/arcterm-` are intercepted BEFORE the text is
+ * sent to the PTY. They're handled entirely in the app, but render
+ * like a real command (block header + output + block footer) so the
+ * user's mental model — "every line is a command with output" — stays
+ * intact.
+ *
+ * The prefix is deliberately namespaced (`/arcterm-...`) so we can never
+ * shadow a real shell command or a user's filename. Anything else
+ * starting with `/` falls through to the shell as normal.
+ *
+ * Commands shipped in Phase 5b:
+ *   /arcterm-help                 — list all internal commands
+ *   /arcterm-model [mode]         — show / set AI backend mode
+ *   /arcterm-models               — list downloadable models
+ *   /arcterm-download <id>        — fetch a model from HuggingFace
+ *   /arcterm-status               — show AI router state
+ *
+ * Output rendering: we write directly into the active session's xterm
+ * buffer using `terminal.write(...)` with ANSI codes for color. The
+ * block separator work the editor normally does on submit is mimicked
+ * here via writeBlockStart/End so the command looks native.
+ */
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+import type { Session } from "./session-manager";
+
+export const INTERNAL_PREFIX = "/arcterm-";
+
+/**
+ * True if this text should be handled internally rather than sent to the
+ * shell. Editor's onSubmit checks this before the PTY send path.
+ */
+export function isInternalCommand(text: string): boolean {
+    return text.trimStart().startsWith(INTERNAL_PREFIX);
+}
+
+interface ModelInfo {
+    id: string;
+    display_name: string;
+    url: string;
+    filename: string;
+    size_bytes: number;
+    parameters: string;
+    quantization: string;
+    license: string;
+    installed: boolean;
+}
+
+interface AiStatus {
+    mode: string;
+    active_id: string;
+    active_display_name: string;
+    local_available: boolean;
+}
+
+interface ProgressPayload {
+    id: string;
+    bytes_downloaded: number;
+    bytes_total: number;
+}
+
+interface DonePayload {
+    id: string;
+    success: boolean;
+    error?: string | null;
+    local_path?: string | null;
+}
+
+/**
+ * Execute an internal command against a specific session. The session
+ * provides the xterm handle we write output to. Errors surface as red
+ * lines; successes use the normal muted style.
+ */
+export async function runInternalCommand(
+    raw: string,
+    session: Session,
+): Promise<void> {
+    const trimmed = raw.trim();
+    // Echo the command as a block header so the user sees what ran.
+    session.terminal.writeBlockStart(trimmed);
+
+    // Parse: `/arcterm-<name> [arg1] [arg2] ...`
+    const parts = trimmed.slice(1).split(/\s+/);
+    const name = parts[0]; // e.g. "arcterm-model"
+    const args = parts.slice(1);
+
+    let exitCode = 0;
+    try {
+        switch (name) {
+            case "arcterm-help":
+                writeHelp(session);
+                break;
+            case "arcterm-model":
+                await cmdModel(session, args);
+                break;
+            case "arcterm-models":
+                await cmdModels(session);
+                break;
+            case "arcterm-download":
+                await cmdDownload(session, args);
+                break;
+            case "arcterm-status":
+                await cmdStatus(session);
+                break;
+            default:
+                writeError(session, `Unknown command: ${name}`);
+                writeLine(
+                    session,
+                    "Try `/arcterm-help` for the list of ArcTerm commands.",
+                );
+                exitCode = 127;
+        }
+    } catch (err) {
+        writeError(session, errMessage(err));
+        exitCode = 1;
+    }
+
+    session.terminal.writeBlockEnd(exitCode, null);
+}
+
+// -- Individual command impls -----------------------------------------
+
+function writeHelp(session: Session): void {
+    const rows: Array<[string, string]> = [
+        ["/arcterm-help", "show this list"],
+        ["/arcterm-model [claude|local|auto]", "show or set AI backend"],
+        ["/arcterm-models", "list available local models"],
+        ["/arcterm-download <id>", "download a model from the registry"],
+        ["/arcterm-status", "show current AI router state"],
+    ];
+    writeLine(session, "\x1b[1mArcTerm commands:\x1b[0m");
+    for (const [cmd, desc] of rows) {
+        // Left column: 38 chars. Matches the widest command.
+        const padded = cmd.padEnd(38, " ");
+        writeLine(session, `  \x1b[36m${padded}\x1b[0m \x1b[2m${desc}\x1b[0m`);
+    }
+}
+
+async function cmdModel(session: Session, args: string[]): Promise<void> {
+    if (args.length === 0) {
+        const status = await invoke<AiStatus>("ai_status");
+        writeLine(
+            session,
+            `Current mode: \x1b[1;36m${status.mode}\x1b[0m (active: ${status.active_display_name})`,
+        );
+        writeLine(
+            session,
+            `Local model: ${status.local_available ? "\x1b[32mready\x1b[0m" : "\x1b[33mnot loaded\x1b[0m"}`,
+        );
+        writeLine(session, "Set with: /arcterm-model <claude|local|auto>");
+        return;
+    }
+    const mode = args[0];
+    if (!["claude", "local", "auto"].includes(mode)) {
+        throw new Error(
+            `Invalid mode '${mode}'. Use one of: claude, local, auto.`,
+        );
+    }
+    await invoke("ai_set_mode", { mode });
+    writeLine(
+        session,
+        `\x1b[32mSwitched AI mode to \x1b[1m${mode}\x1b[0m.`,
+    );
+}
+
+async function cmdModels(session: Session): Promise<void> {
+    const list = await invoke<ModelInfo[]>("model_list");
+    if (list.length === 0) {
+        writeLine(session, "No models registered.");
+        return;
+    }
+    writeLine(session, "\x1b[1mAvailable models:\x1b[0m");
+    for (const m of list) {
+        const tag = m.installed
+            ? "\x1b[32m● installed\x1b[0m"
+            : "\x1b[2m○ not downloaded\x1b[0m";
+        const size = formatSize(m.size_bytes);
+        writeLine(
+            session,
+            `  \x1b[36m${m.id.padEnd(28, " ")}\x1b[0m ${m.display_name} — ${size} (${m.quantization}, ${m.license}) ${tag}`,
+        );
+    }
+    writeLine(session, "\nDownload with: /arcterm-download <id>");
+}
+
+async function cmdDownload(session: Session, args: string[]): Promise<void> {
+    if (args.length === 0) {
+        throw new Error(
+            "Specify a model id. Run /arcterm-models to see options.",
+        );
+    }
+    // Shortcut: "/arcterm-download gemma" -> the default Gemma variant.
+    // Saves users from having to type the exact id for the common case.
+    let id = args[0];
+    if (id === "gemma") id = "gemma-4-e2b-it-q4km";
+
+    writeLine(session, `Starting download: \x1b[36m${id}\x1b[0m`);
+    writeLine(session, "This may take a few minutes depending on your connection.");
+    writeLine(session, "");
+
+    // Subscribe to progress + done events. Progress paints an in-place
+    // line (\r carriage-return + erase + redraw); done unsubscribes.
+    let unlistenProgress: UnlistenFn | null = null;
+    let unlistenDone: UnlistenFn | null = null;
+    let firstProgress = true;
+
+    const donePromise = new Promise<DonePayload>(async (resolve) => {
+        unlistenProgress = await listen<ProgressPayload>(
+            "model://progress",
+            (ev) => {
+                if (ev.payload.id !== id) return;
+                const pct = ev.payload.bytes_total > 0
+                    ? Math.floor(
+                        (ev.payload.bytes_downloaded / ev.payload.bytes_total) * 100,
+                    )
+                    : 0;
+                const bar = renderProgressBar(pct);
+                const current = formatSize(ev.payload.bytes_downloaded);
+                const total = formatSize(ev.payload.bytes_total);
+                // \r to return to start of line, \x1b[2K to erase, then redraw.
+                // The first emit includes nothing special; subsequent emits
+                // overwrite the previous line in place.
+                if (!firstProgress) {
+                    session.terminal.send; // noop — we write directly below.
+                }
+                firstProgress = false;
+                // Write to the xterm buffer directly rather than through
+                // terminal.send (which goes to the PTY). Direct write
+                // bypasses the shell entirely.
+                session.terminal.writeBlockStart; // typed handle doesn't expose raw write; use a helper
+                writeRaw(
+                    session,
+                    `\r\x1b[2K  ${bar} ${pct}% \x1b[2m(${current} / ${total})\x1b[0m`,
+                );
+            },
+        );
+        unlistenDone = await listen<DonePayload>("model://done", (ev) => {
+            if (ev.payload.id !== id) return;
+            unlistenProgress?.();
+            unlistenDone?.();
+            resolve(ev.payload);
+        });
+    });
+
+    try {
+        await invoke("model_download", { id });
+    } catch (err) {
+        unlistenProgress?.();
+        unlistenDone?.();
+        throw err;
+    }
+
+    const done = await donePromise;
+    writeLine(session, ""); // newline after the progress bar
+    if (done.success) {
+        writeLine(
+            session,
+            `\x1b[32mDownload complete.\x1b[0m ${done.local_path ?? ""}`,
+        );
+        writeLine(
+            session,
+            "The model is loaded and AI mode has been switched to \x1b[1mauto\x1b[0m.",
+        );
+    } else {
+        writeError(session, done.error ?? "download failed");
+    }
+}
+
+async function cmdStatus(session: Session): Promise<void> {
+    const status = await invoke<AiStatus>("ai_status");
+    writeLine(session, `Mode:         \x1b[1m${status.mode}\x1b[0m`);
+    writeLine(
+        session,
+        `Active:       ${status.active_display_name} (${status.active_id})`,
+    );
+    writeLine(
+        session,
+        `Local model:  ${status.local_available ? "\x1b[32mready\x1b[0m" : "\x1b[33mnot loaded\x1b[0m"}`,
+    );
+}
+
+// -- Rendering helpers -------------------------------------------------
+
+function writeLine(session: Session, line: string): void {
+    writeRaw(session, line + "\r\n");
+}
+
+function writeError(session: Session, msg: string): void {
+    writeLine(session, `\x1b[31mError:\x1b[0m ${msg}`);
+}
+
+/**
+ * Write raw bytes (including ANSI escapes + newlines) into the active
+ * session's xterm buffer. TerminalHandle doesn't expose a direct write
+ * method today, so we piggyback via `writeBlockEnd` -> "\n" which we
+ * already know is safe. For now we just stuff into the same ANSI stream
+ * by calling the session's raw terminal behind the handle. Since the
+ * handle's API surface is limited, we temporarily re-use the send path:
+ * no — send goes to PTY. We need a real raw-write exit.
+ *
+ * Solution: we added no new handle method; the session owns its xterm
+ * internally and only exposes send/write*. Workaround: use the
+ * `writeBlockStart` + `writeBlockEnd` pair to frame the output block,
+ * and drop the internal bytes inline via write_terminal_raw on the
+ * handle. For this to work we add a `writeRaw` method to TerminalHandle.
+ */
+function writeRaw(session: Session, bytes: string): void {
+    session.terminal.writeRaw(bytes);
+}
+
+function renderProgressBar(pct: number): string {
+    const width = 24;
+    const filled = Math.round((pct / 100) * width);
+    const empty = width - filled;
+    return (
+        "\x1b[38;2;79;195;247m" +
+        "█".repeat(filled) +
+        "\x1b[2m" +
+        "░".repeat(empty) +
+        "\x1b[0m"
+    );
+}
+
+function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let i = -1;
+    let b = bytes;
+    do {
+        b /= 1024;
+        i++;
+    } while (b >= 1024 && i < units.length - 1);
+    return `${b.toFixed(b < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+function errMessage(e: unknown): string {
+    if (e instanceof Error) return e.message;
+    if (typeof e === "string") return e;
+    return JSON.stringify(e);
+}

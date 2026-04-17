@@ -13,10 +13,13 @@ use uuid::Uuid;
 
 use std::path::PathBuf;
 
+use crate::ai::router::Mode;
 use crate::ai::{AiChunk, AiContext, AiRequest, AiResponse, AiRouter};
 use crate::completion::{complete as fs_complete_impl, CompletionResult};
 use crate::history::{Entry, HistoryStore};
+use crate::models::{self, downloader, ModelInfo};
 use crate::pty::PtyManager;
+use crate::settings::{Settings, SettingsStore};
 
 // -- PTY commands --------------------------------------------------------
 
@@ -214,6 +217,127 @@ pub async fn ai_stream(
 #[allow(dead_code)]
 pub fn empty_context() -> AiContext {
     AiContext::default()
+}
+
+// -- Settings -----------------------------------------------------------
+
+#[tauri::command]
+pub fn settings_get(store: State<'_, std::sync::Arc<SettingsStore>>) -> Settings {
+    store.inner().get()
+}
+
+#[tauri::command]
+pub fn settings_set(
+    store: State<'_, std::sync::Arc<SettingsStore>>,
+    settings: Settings,
+) -> Result<(), String> {
+    store.inner().set(settings)
+}
+
+// -- Models -------------------------------------------------------------
+
+#[tauri::command]
+pub fn model_list() -> Vec<ModelInfo> {
+    models::list()
+}
+
+#[tauri::command]
+pub async fn model_download(
+    app: AppHandle,
+    router: State<'_, std::sync::Arc<AiRouter>>,
+    download_lock: State<'_, std::sync::Arc<downloader::DownloadLock>>,
+    id: String,
+) -> Result<(), String> {
+    let spec = models::find(&id)
+        .ok_or_else(|| format!("unknown model id: {id}"))?;
+    let _guard = download_lock.inner().try_acquire(&id)?;
+
+    let result = downloader::download(app.clone(), spec).await;
+    let done = match &result {
+        Ok(path) => downloader::DonePayload {
+            id: id.clone(),
+            success: true,
+            error: None,
+            local_path: Some(path.clone()),
+        },
+        Err(err) => downloader::DonePayload {
+            id: id.clone(),
+            success: false,
+            error: Some(err.clone()),
+            local_path: None,
+        },
+    };
+
+    // On success, load the model into memory and hand it to the router.
+    // Loading a 3 GB GGUF + compiling Metal shaders is slow, so we do
+    // it on a blocking thread to keep the Tauri async runtime free.
+    if let Ok(path) = &result {
+        let path = PathBuf::from(path);
+        let router = router.inner().clone();
+        let load_result = tokio::task::spawn_blocking(move || {
+            crate::ai::local_llama::LocalLlamaBackend::load(path)
+        })
+        .await
+        .map_err(|e| format!("load join: {e}"))?;
+
+        match load_result {
+            Ok(backend) => {
+                // Switch mode to Auto so the newly-available local model
+                // actually gets used in the absence of Claude.
+                let _ = router.install_local(std::sync::Arc::new(backend), true);
+            }
+            Err(e) => {
+                log::warn!("model downloaded but load failed: {e}");
+            }
+        }
+    }
+
+    let _ = app.emit(downloader::EVENT_DONE, done);
+    result.map(|_| ())
+}
+
+#[tauri::command]
+pub async fn model_delete(
+    router: State<'_, std::sync::Arc<AiRouter>>,
+    id: String,
+) -> Result<(), String> {
+    let spec = models::find(&id)
+        .ok_or_else(|| format!("unknown model id: {id}"))?;
+    downloader::uninstall(spec).await?;
+    // Drop our in-memory copy of this backend if it was the active one.
+    // Today we only ship one local model slot, so uninstall always
+    // empties the local backend. Multi-model support (Phase 7) will
+    // need to check id equality.
+    router.inner().uninstall_local();
+    Ok(())
+}
+
+// -- Router mode switching ---------------------------------------------
+
+#[tauri::command]
+pub fn ai_set_mode(
+    router: State<'_, std::sync::Arc<AiRouter>>,
+    store: State<'_, std::sync::Arc<SettingsStore>>,
+    mode: String,
+) -> Result<(), String> {
+    let parsed = Mode::parse(&mode)?;
+    router.inner().set_mode(parsed)?;
+    // Persist so the choice survives relaunch.
+    store.inner().update(|s| s.ai.mode = parsed.as_str().to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn ai_status(
+    router: State<'_, std::sync::Arc<AiRouter>>,
+) -> serde_json::Value {
+    let active = router.inner().active();
+    serde_json::json!({
+        "mode": router.inner().current_mode().as_str(),
+        "active_id": active.id(),
+        "active_display_name": active.display_name(),
+        "local_available": router.inner().local_available(),
+    })
 }
 
 // -- Filesystem completion ---------------------------------------------

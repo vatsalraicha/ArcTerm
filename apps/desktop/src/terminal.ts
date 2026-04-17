@@ -46,6 +46,13 @@ interface PtyExitPayload {
 export interface TerminalHandle {
   /** Write raw text to the PTY (e.g. a command line followed by \r). */
   send: (data: string) => Promise<void>;
+  /**
+   * Write bytes DIRECTLY into the xterm buffer — bypasses the PTY.
+   * Used by ArcTerm-internal commands (slash commands, status messages)
+   * that want to render output inline without involving the shell.
+   * Supports ANSI escape sequences exactly the same way shell output does.
+   */
+  writeRaw: (data: string) => void;
   /** Subscribe to cwd updates emitted via OSC 7 from the shell. */
   onCwdChange: (cb: (cwd: string) => void) => void;
   /** Subscribe to git-branch updates from custom OSC 1337 ArcTermBranch. */
@@ -232,6 +239,7 @@ export async function setupTerminal(host: HTMLElement): Promise<TerminalHandle> 
   // Caller decides who holds focus — typically the InputEditor takes it.
   return {
     send: (data: string) => invoke("pty_write", { id: ptyId, data }),
+    writeRaw: (data: string) => term.write(data),
     onCwdChange: (cb) => {
       cwdListeners.add(cb);
       // Replay the current cwd so late subscribers don't miss it.

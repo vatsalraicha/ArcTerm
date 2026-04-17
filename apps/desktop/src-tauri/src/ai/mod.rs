@@ -11,8 +11,10 @@
 //! until the native async-in-traits story is complete enough to be
 //! ergonomic for dyn Trait uses like ours.
 
+pub mod auto;
 pub mod claude;
 pub mod context;
+pub mod local_llama;
 pub mod router;
 
 use async_trait::async_trait;
