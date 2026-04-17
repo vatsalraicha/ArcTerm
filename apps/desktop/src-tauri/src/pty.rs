@@ -108,16 +108,49 @@ impl PtyManager {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
 
-        // Shell integration: point zsh at our ZDOTDIR so our rc files chain-
-        // load the user's .zshrc and then install ArcTerm's prompt/cwd hooks.
-        // Only wire this for zsh — bash/fish will get their own hooks later.
+        // Shell integration: the mechanism depends on the shell.
+        //   - zsh:  set ZDOTDIR; our zdotdir/.zshrc chain-loads the user's
+        //           .zshrc then arcterm.zsh.
+        //   - bash: add `--rcfile <bash-rcfile>`; it chain-loads .bashrc
+        //           and then arcterm.bash. (--rcfile is honored for
+        //           interactive non-login shells, which is what PTYs are.)
+        //   - fish: add `-C "source .../arcterm.fish"`; fish always loads
+        //           its own config.fish, then runs our -C snippet.
+        // ARCTERM_INTEGRATION_DIR + ARCTERM_SESSION are set in all cases
+        // so scripts can locate sibling hook files and detect "inside
+        // ArcTerm" without string-matching TERM_PROGRAM.
         if let Some(paths) = &self.shell_paths {
-            if shell.ends_with("zsh") {
-                cmd.env("ZDOTDIR", &paths.zdotdir);
-                cmd.env("ARCTERM_INTEGRATION_DIR", &paths.integration_dir);
-                // Marker env var so scripts can detect "running inside ArcTerm"
-                // without having to string-match TERM_PROGRAM.
-                cmd.env("ARCTERM_SESSION", "1");
+            cmd.env("ARCTERM_INTEGRATION_DIR", &paths.integration_dir);
+            cmd.env("ARCTERM_SESSION", "1");
+
+            let shell_name = std::path::Path::new(&shell)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            match shell_name {
+                "zsh" => {
+                    cmd.env("ZDOTDIR", &paths.zdotdir);
+                }
+                "bash" => {
+                    // --rcfile replaces the default rc lookup (~/.bashrc).
+                    // Our rcfile chain-loads the user's .bashrc first so
+                    // their env is intact. CommandBuilder::arg() is
+                    // in-place (returns ()), so we call per-arg.
+                    cmd.arg("--rcfile");
+                    cmd.arg(&paths.bash_rcfile);
+                }
+                "fish" => {
+                    // -C "<cmd>" runs after config.fish. Source our hook
+                    // file as a post-init step so user config wins the
+                    // first pass but our prompt suppression wins the last.
+                    cmd.arg("-C");
+                    cmd.arg(format!("source {}", paths.fish_hook.display()));
+                }
+                _ => {
+                    // Unknown shell — we still export the env vars above
+                    // so any curious user can source the hooks manually,
+                    // but we don't try to inject auto-loading.
+                }
             }
         }
 

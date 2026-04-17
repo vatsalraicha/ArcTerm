@@ -27,18 +27,47 @@ use std::path::{Path, PathBuf};
 // Paths are relative to this source file:
 //   src/shell_hooks.rs -> up 4 levels -> workspace root
 const ARCTERM_ZSH: &str = include_str!("../../../../shell-integration/arcterm.zsh");
+const ARCTERM_BASH: &str = include_str!("../../../../shell-integration/arcterm.bash");
+const ARCTERM_FISH: &str = include_str!("../../../../shell-integration/arcterm.fish");
 const ZDOTDIR_ZSHENV: &str = include_str!("../../../../shell-integration/zdotdir/.zshenv");
 const ZDOTDIR_ZSHRC: &str = include_str!("../../../../shell-integration/zdotdir/.zshrc");
+
+/// Chain bashrc: sources the user's ~/.bashrc (if present) and then our
+/// arcterm.bash hooks. Used with `bash --rcfile <this>` on PTY spawn.
+/// Not a file on disk in the workspace — we generate it here so the path
+/// embedded in the sourced string (`ARCTERM_INTEGRATION_DIR`) is correct
+/// per user's $HOME. Kept inline for clarity.
+fn bash_rcfile_contents() -> String {
+    r#"# ArcTerm bash rcfile — auto-managed, do not edit.
+# Chain-loads the user's own ~/.bashrc first so their env, aliases, and
+# prompt frameworks all run normally, then sources arcterm.bash last so
+# our prompt suppression + shell integration hooks win.
+
+[[ -r "${HOME}/.bashrc" ]] && source "${HOME}/.bashrc"
+
+: "${ARCTERM_INTEGRATION_DIR:=${HOME}/.arcterm/shell-integration}"
+if [[ -r "${ARCTERM_INTEGRATION_DIR}/arcterm.bash" ]]; then
+    source "${ARCTERM_INTEGRATION_DIR}/arcterm.bash"
+fi
+"#.to_string()
+}
 
 /// Paths the PTY spawner needs. Returned so we can set env vars without
 /// re-computing them.
 pub struct Paths {
     /// Value for `ZDOTDIR`. zsh reads `.zshenv`, `.zshrc` etc. from here.
     pub zdotdir: PathBuf,
-    /// Value for `ARCTERM_INTEGRATION_DIR`. The `.zshrc` we write uses this
-    /// to locate `arcterm.zsh` so users can't accidentally break sourcing
+    /// Value for `ARCTERM_INTEGRATION_DIR`. Scripts use this to locate
+    /// their sibling hook file so users can't accidentally break sourcing
     /// by moving files around.
     pub integration_dir: PathBuf,
+    /// Path to the bash rcfile we pass via `bash --rcfile <path>`. It
+    /// chain-loads the user's own .bashrc then sources arcterm.bash.
+    pub bash_rcfile: PathBuf,
+    /// Path to the fish hook script. For fish we spawn
+    /// `fish -C "source <this>"` rather than using an rcfile since fish
+    /// always reads its own config.fish.
+    pub fish_hook: PathBuf,
 }
 
 /// Install (or refresh) the shell integration files under `~/.arcterm/`.
@@ -58,9 +87,19 @@ pub fn install() -> Result<Paths, String> {
         .map_err(|e| format!("create {}: {e}", integration_dir.display()))?;
     fs::create_dir_all(&zdotdir).map_err(|e| format!("create {}: {e}", zdotdir.display()))?;
 
+    // zsh
     write_file(&integration_dir.join("arcterm.zsh"), ARCTERM_ZSH)?;
     write_file(&zdotdir.join(".zshenv"), ZDOTDIR_ZSHENV)?;
     write_file(&zdotdir.join(".zshrc"), ZDOTDIR_ZSHRC)?;
+
+    // bash
+    write_file(&integration_dir.join("arcterm.bash"), ARCTERM_BASH)?;
+    let bash_rcfile = root.join("bash-rcfile");
+    write_file(&bash_rcfile, &bash_rcfile_contents())?;
+
+    // fish
+    write_file(&integration_dir.join("arcterm.fish"), ARCTERM_FISH)?;
+    let fish_hook = integration_dir.join("arcterm.fish");
 
     log::info!(
         "shell integration installed: zdotdir={} integration={}",
@@ -71,6 +110,8 @@ pub fn install() -> Result<Paths, String> {
     Ok(Paths {
         zdotdir,
         integration_dir,
+        bash_rcfile,
+        fish_hook,
     })
 }
 
