@@ -32,6 +32,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # llama-cpp-sys-2 builds llama.cpp's C++ which uses std::filesystem::path.
+  # The Xcode SDK marks that API as "introduced in macOS 10.15" and refuses
+  # to compile if the deployment target is older. 11.0 is also the Apple
+  # Silicon minimum, so this is strictly safe.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
 jobs:
   check:
     name: Check (macOS)

@@ -28,6 +28,14 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # llama-cpp-sys-2 builds llama.cpp's C++ which uses std::filesystem::path.
+  # The Xcode SDK marks that API as "introduced in macOS 10.15" and refuses
+  # to compile if the deployment target is older. 11.0 is also the Apple
+  # Silicon minimum and maps to Big Sur — old enough that nearly every Mac
+  # in active use supports it.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
 jobs:
   build:
     name: Build (${{ matrix.target }})
