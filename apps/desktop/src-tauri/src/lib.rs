@@ -35,6 +35,17 @@ pub fn run() {
         }
     };
 
+    // Startup sweep: remove any stranded `.part` files from a previous
+    // crashed/killed download. Cheap (one read_dir), idempotent, and
+    // prevents gigabyte-scale disk leaks when the user re-tries a fetch.
+    let (parts_removed, parts_bytes) = models::cleanup_stranded_parts();
+    if parts_removed > 0 {
+        log::info!(
+            "cleaned up {parts_removed} stranded download file(s), reclaimed {} MB",
+            parts_bytes / 1_048_576
+        );
+    }
+
     // History is optional in the same sense — if SQLite can't open we log
     // and continue without autosuggest/overlay features.
     let history = match HistoryStore::open() {

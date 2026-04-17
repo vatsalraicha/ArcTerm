@@ -166,3 +166,45 @@ pub fn list() -> Vec<ModelInfo> {
         })
         .collect()
 }
+
+/// Sweep `~/.arcterm/models/` for stranded `.part` files and delete them.
+///
+/// These appear when a download crashes or is force-killed mid-transfer
+/// (we saw it during Phase 5b Q8 testing). A left-behind `.part` wastes
+/// disk forever because nothing in the app references it. Running the
+/// sweep once at startup is cheap (a single `read_dir`) and prevents
+/// the "where did my 4 GB go" surprise for users who re-try a download.
+///
+/// Returns the number of files removed + total bytes reclaimed so the
+/// caller (lib.rs) can log a meaningful summary.
+pub fn cleanup_stranded_parts() -> (usize, u64) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return (0, 0);
+    };
+    let dir = std::path::PathBuf::from(home).join(".arcterm/models");
+    let read = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return (0, 0), // dir doesn't exist yet → nothing to do
+    };
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in read.flatten() {
+        let path = entry.path();
+        let is_part = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s == "part")
+            .unwrap_or(false);
+        if !is_part {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            bytes += meta.len();
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            log::info!("removed stranded download: {}", path.display());
+        }
+    }
+    (removed, bytes)
+}
