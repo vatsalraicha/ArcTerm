@@ -34,7 +34,22 @@ env:
   # to compile if the deployment target is older. 11.0 is also the Apple
   # Silicon minimum and maps to Big Sur — old enough that nearly every Mac
   # in active use supports it.
+  #
+  # Belt-and-suspenders: BOTH deployment-target variables, because the
+  # toolchain is layered and each layer respects a different one.
+  #   - MACOSX_DEPLOYMENT_TARGET is what rustc + cc-rs + most build
+  #     scripts look for. Without it, rustc's linker emits a minimum-10.7
+  #     target triple on macOS.
+  #   - CMAKE_OSX_DEPLOYMENT_TARGET is what cmake itself reads. The
+  #     llama.cpp CMakeLists builds through cmake-rs, which invokes
+  #     cmake as a subprocess and does NOT automatically forward
+  #     MACOSX_DEPLOYMENT_TARGET. Without this second variable, cmake
+  #     emits files with no deployment target, and clang rejects
+  #     std::filesystem::path with "introduced in 10.15 unknown" — the
+  #     exact failure v0.1.0-alpha.phase7's release attempt kept hitting
+  #     even after we added MACOSX_DEPLOYMENT_TARGET.
   MACOSX_DEPLOYMENT_TARGET: "11.0"
+  CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
   build:

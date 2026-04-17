@@ -33,11 +33,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # llama-cpp-sys-2 builds llama.cpp's C++ which uses std::filesystem::path.
-  # The Xcode SDK marks that API as "introduced in macOS 10.15" and refuses
-  # to compile if the deployment target is older. 11.0 is also the Apple
-  # Silicon minimum, so this is strictly safe.
+  # Deployment target for llama-cpp-sys-2's C++ build (std::filesystem is
+  # macOS 10.15+). BOTH variables are set because cargo/cc-rs read
+  # MACOSX_DEPLOYMENT_TARGET but cmake-rs (used under the hood by
+  # llama-cpp-sys-2's CMakeLists) only honors CMAKE_OSX_DEPLOYMENT_TARGET.
+  # Keeping the pair in sync between CI and release workflows prevents
+  # "works on CI, fails on release" drift.
   MACOSX_DEPLOYMENT_TARGET: "11.0"
+  CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
   check:
