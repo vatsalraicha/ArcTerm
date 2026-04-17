@@ -13,6 +13,11 @@ pub mod shell_hooks;
 
 use std::sync::Arc;
 
+use tauri::menu::{
+    AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+};
+use tauri::Emitter;
+
 use ai::claude::ClaudeCliBackend;
 use ai::local_llama::LocalLlamaBackend;
 use ai::router::Mode;
@@ -129,6 +134,79 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // Native macOS menu bar. On macOS, setting a menu here replaces
+        // Tauri's default, so we have to recreate the standard items
+        // (About, Services, Hide/Show, Quit, Edit verbs, Window). The
+        // payoff is our custom "Settings…" entry — ⌘, already opens the
+        // settings panel from the keyboard, but users expect to find it
+        // under the app menu too.
+        .setup(|app| {
+            let handle = app.handle();
+            let about_meta = AboutMetadataBuilder::new()
+                .name(Some("ArcTerm"))
+                .version(Some(env!("CARGO_PKG_VERSION")))
+                .short_version(Some(env!("CARGO_PKG_VERSION")))
+                .build();
+
+            let settings_item = MenuItemBuilder::with_id("arcterm:settings", "Settings…")
+                .accelerator("Cmd+,")
+                .build(handle)?;
+
+            let app_menu = SubmenuBuilder::new(handle, "ArcTerm")
+                .item(&PredefinedMenuItem::about(
+                    handle,
+                    Some("About ArcTerm"),
+                    Some(about_meta),
+                )?)
+                .separator()
+                .item(&settings_item)
+                .separator()
+                .item(&PredefinedMenuItem::services(handle, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::hide(handle, None)?)
+                .item(&PredefinedMenuItem::hide_others(handle, None)?)
+                .item(&PredefinedMenuItem::show_all(handle, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::quit(handle, None)?)
+                .build()?;
+
+            // Edit menu — required for standard ⌘Z/⌘X/⌘C/⌘V to appear as
+            // menu entries. WebKit handles these inside the editor
+            // without the menu too, but having them visible is a macOS
+            // convention users expect.
+            let edit_menu = SubmenuBuilder::new(handle, "Edit")
+                .item(&PredefinedMenuItem::undo(handle, None)?)
+                .item(&PredefinedMenuItem::redo(handle, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::cut(handle, None)?)
+                .item(&PredefinedMenuItem::copy(handle, None)?)
+                .item(&PredefinedMenuItem::paste(handle, None)?)
+                .item(&PredefinedMenuItem::select_all(handle, None)?)
+                .build()?;
+
+            // Window menu — minimize/zoom/close wired to the active window.
+            let window_menu = SubmenuBuilder::new(handle, "Window")
+                .item(&PredefinedMenuItem::minimize(handle, None)?)
+                .item(&PredefinedMenuItem::maximize(handle, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::close_window(handle, None)?)
+                .build()?;
+
+            let menu = MenuBuilder::new(handle)
+                .item(&app_menu)
+                .item(&edit_menu)
+                .item(&window_menu)
+                .build()?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            // One case today. As we add more menu items, route here by id
+            // (e.g. `arcterm:new-session` → emit `menu://new-session`).
+            if event.id() == "arcterm:settings" {
+                let _ = app.emit("menu://settings", ());
+            }
+        })
         // PtyManager owns all live PTYs. Stored in Tauri state so command
         // handlers can reach it via `tauri::State<PtyManager>`.
         .manage(pty_manager)

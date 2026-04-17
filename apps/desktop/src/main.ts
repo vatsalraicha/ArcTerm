@@ -12,6 +12,7 @@
  *   - Sidebar + global keybindings (Cmd+T/W/1-9/[/]) cover session nav.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import { SessionManager, type Session } from "./session-manager";
 import { InputEditor } from "./input-editor";
@@ -328,14 +329,21 @@ async function boot(mounts: Mounts): Promise<void> {
   });
 
   // --- Settings panel --------------------------------------------------
-  // Triggered by ⌘, (standard macOS convention). Lets the user flip
-  // theme + AI mode + local model + Claude path from one form instead
-  // of memorizing three slash-commands. Save is live-apply: theme flips
-  // immediately, router swaps mode immediately, rest persists.
+  // Triggered by ⌘, (standard macOS convention) AND by the native
+  // `ArcTerm → Settings…` menu item (which emits `menu://settings`
+  // from the Rust side). Lets the user flip theme + AI mode + local
+  // model + Claude path from one form instead of memorizing three
+  // slash-commands. Save is live-apply: theme flips immediately,
+  // router swaps mode immediately, rest persists.
   const settingsPanel = new SettingsPanel({
     host: mounts.overlayHost,
     applyTheme: (next) => applyTheme(next, manager),
     focusEditor: () => editor.focus(),
+  });
+  // Menu → Settings. No unlisten wired because the listener lives for
+  // the whole app lifetime; tidy teardown happens at process exit.
+  void listen("menu://settings", () => {
+    if (!settingsPanel.isOpen()) void settingsPanel.open();
   });
 
   // --- Sidebar ---------------------------------------------------------
