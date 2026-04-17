@@ -57,6 +57,7 @@ export class Sidebar {
 
         opts.listEl.addEventListener("click", this.onListClick);
         opts.listEl.addEventListener("dblclick", this.onListDblClick);
+        opts.listEl.addEventListener("contextmenu", this.onListContextMenu);
     }
 
     private render(): void {
@@ -191,6 +192,54 @@ export class Sidebar {
         this.beginRename(row.dataset.sessionId, nameEl);
     };
 
+    /**
+     * Right-click on a session row → context menu with Rename, Close,
+     * Close Others. Discoverability handle for the rename feature
+     * (double-click works but isn't obvious until you stumble on it).
+     */
+    private readonly onListContextMenu = (ev: MouseEvent): void => {
+        const row = (ev.target as HTMLElement).closest(
+            ".session-item",
+        ) as HTMLElement | null;
+        if (!row?.dataset.sessionId) return;
+        ev.preventDefault();
+        const id = row.dataset.sessionId;
+        const nameEl = row.querySelector(".session-name") as HTMLElement | null;
+
+        const sessions = this.opts.manager.list();
+        const items: ContextMenuItem[] = [
+            {
+                label: "Rename",
+                action: () => {
+                    if (nameEl) this.beginRename(id, nameEl);
+                },
+            },
+            {
+                label: "Close",
+                action: () => void this.closeSession(id),
+            },
+        ];
+        if (sessions.length > 1) {
+            items.push({
+                label: "Close Others",
+                action: () => void this.closeOthers(id),
+            });
+        }
+
+        showContextMenu(ev.clientX, ev.clientY, items);
+    };
+
+    /** Close every session except `keepId`. Confirms each running session
+     *  individually so the user doesn't lose in-flight work without notice. */
+    private async closeOthers(keepId: string): Promise<void> {
+        const others = this.opts.manager
+            .list()
+            .filter((s) => s.id !== keepId);
+        for (const s of others) {
+            await this.closeSession(s.id);
+        }
+    }
+
     private beginRename(id: string, nameEl: HTMLElement): void {
         const original = nameEl.textContent ?? "";
         nameEl.setAttribute("contenteditable", "true");
@@ -269,4 +318,81 @@ function escapeHtml(s: string): string {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+}
+
+// --- Context menu (used by right-click on session rows) ----------------
+//
+// Lightweight inline implementation rather than a separate component:
+// this is the only place ArcTerm uses a context menu today. If a second
+// caller materializes (e.g. right-click on a block in the terminal),
+// extract to its own file.
+
+interface ContextMenuItem {
+    label: string;
+    /** Optional disabled state for items that aren't applicable in the
+     *  current context (e.g. "Close Others" when only one session exists). */
+    disabled?: boolean;
+    action: () => void;
+}
+
+/**
+ * Show a context menu at viewport coords. Only one menu can exist at a
+ * time — opening a new one closes any previous instance first. Click
+ * anywhere outside (mousedown), Esc, or selecting an item dismisses.
+ */
+function showContextMenu(
+    clientX: number,
+    clientY: number,
+    items: ContextMenuItem[],
+): void {
+    // Tear down any existing menu first.
+    document.querySelectorAll(".arcterm-context-menu").forEach((n) => n.remove());
+
+    const menu = document.createElement("ul");
+    menu.className = "arcterm-context-menu";
+    menu.setAttribute("role", "menu");
+    // We position offscreen first to measure, then nudge into the viewport
+    // so the menu never spills off the right/bottom edges.
+    menu.style.left = "-9999px";
+    menu.style.top = "-9999px";
+
+    for (const item of items) {
+        const li = document.createElement("li");
+        li.className = "arcterm-context-menu-item";
+        if (item.disabled) li.classList.add("disabled");
+        li.setAttribute("role", "menuitem");
+        li.textContent = item.label;
+        li.addEventListener("click", () => {
+            if (item.disabled) return;
+            close();
+            item.action();
+        });
+        menu.append(li);
+    }
+    document.body.append(menu);
+
+    // Nudge into viewport.
+    const rect = menu.getBoundingClientRect();
+    const x = Math.min(clientX, window.innerWidth - rect.width - 4);
+    const y = Math.min(clientY, window.innerHeight - rect.height - 4);
+    menu.style.left = `${Math.max(4, x)}px`;
+    menu.style.top = `${Math.max(4, y)}px`;
+
+    function close() {
+        menu.remove();
+        window.removeEventListener("mousedown", onOutside, true);
+        window.removeEventListener("keydown", onKey, true);
+    }
+    function onOutside(ev: MouseEvent) {
+        if (!menu.contains(ev.target as Node)) close();
+    }
+    function onKey(ev: KeyboardEvent) {
+        if (ev.key === "Escape") {
+            ev.preventDefault();
+            close();
+        }
+    }
+    // Capture-phase listeners so we win against everything else.
+    window.addEventListener("mousedown", onOutside, true);
+    window.addEventListener("keydown", onKey, true);
 }

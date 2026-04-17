@@ -231,3 +231,44 @@
   font-style: italic;
   text-align: center;
 }
+
+/*
+ * Right-click context menu (sidebar session rows). Floats absolutely at
+ * the click position; auto-dismisses on outside-click or Esc. Themed
+ * via the same tokens as the rest of the app so it picks up dark/light
+ * automatically.
+ */
+.arcterm-context-menu {
+  position: fixed;
+  z-index: 200;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  min-width: 160px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  font-size: 13px;
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.arcterm-context-menu-item {
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.arcterm-context-menu-item:hover {
+  background: var(--selection-bg);
+}
+
+.arcterm-context-menu-item.disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.arcterm-context-menu-item.disabled:hover {
+  background: transparent;
+}
