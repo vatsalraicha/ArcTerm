@@ -103,6 +103,21 @@
 }
 
 /*
+ * Loading state — toggled by the ? prefix flow while the AI responds.
+ * We pulse the text opacity to signal "working" without introducing a
+ * new UI surface; users still see their original `? query` so the
+ * context is never lost.
+ */
+.arcterm-input-editor.arcterm-editor-loading {
+  animation: arcterm-editor-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes arcterm-editor-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/*
  * Ghost text autosuggestion. contenteditable=false + user-select:none keeps
  * the caret from entering and keeps the user from accidentally selecting
  * the suggestion when they drag across the editor.
