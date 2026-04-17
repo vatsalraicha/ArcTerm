@@ -58,9 +58,10 @@ fn default_theme() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct AiSettings {
     /// Backend mode: which backend answers AI requests.
-    ///   - "claude"  → Claude CLI only (legacy Phase 5a behavior)
-    ///   - "local"   → local Gemma only
-    ///   - "auto"    → try Claude, fall back to local on failure
+    /// - "claude"  → Claude CLI only (legacy Phase 5a behavior)
+    /// - "local"   → local Gemma only
+    /// - "auto"    → try Claude, fall back to local on failure
+    ///
     /// Default is "auto" so the user's Pro/Max subscription is used when
     /// available and they get a working answer even offline.
     #[serde(default = "default_mode")]
@@ -153,7 +154,7 @@ impl SettingsStore {
     /// to avoid clone cost for a field-level update.
     pub fn update<F: FnOnce(&mut Settings)>(&self, f: F) -> Result<(), String> {
         let mut guard = self.inner.write();
-        f(&mut *guard);
+        f(&mut guard);
         let snapshot = guard.clone();
         drop(guard);
         self.write_to_disk(&snapshot)

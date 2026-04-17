@@ -213,7 +213,7 @@ impl HistoryStore {
         limit: u32,
     ) -> Result<Vec<Entry>, String> {
         let conn = self.conn.lock();
-        let limit = limit.max(1).min(500) as i64;
+        let limit = limit.clamp(1, 500) as i64;
 
         // For the typical overlay case (empty query, show recent) we can
         // short-circuit to a simple ORDER BY started_at DESC.

@@ -1,0 +1,93 @@
+# Continuous integration for ArcTerm.
+#
+# Runs on every push to main and every PR. Single-platform (macOS) because
+# that's our only officially-supported target — `llama-cpp-2`'s Metal
+# feature is macOS-only, and cross-platform Tauri builds introduce enough
+# platform-specific quirks (webkit2gtk on Linux, webview2 on Windows)
+# that supporting them would double our CI surface for no user benefit
+# today. Linux / Windows users are welcome to fork and add their own
+# workflows; the Rust + TS code itself is portable.
+#
+# What this verifies:
+#   * Rust compiles (`cargo check`)
+#   * Rust passes linting (`cargo clippy`) — warnings fail the job
+#   * Unit tests pass (`cargo test`)
+#   * TypeScript + Vite bundle cleanly (`pnpm vite:build`)
+#
+# Not verified here:
+#   * `tauri build` (the full release bundle) — covered by release.yml
+#     on version tags; too slow to run on every push.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs so a rapid-fire push only uses one runner-slot.
+# Keeps our free GH Actions minutes from piling up on no-op commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Rust: stable toolchain + clippy/rustfmt components for the lint
+      # step below. Swatinem/rust-cache hashes Cargo.lock and caches the
+      # entire target/ across runs, dropping a clean compile from ~8 min
+      # to ~1-2 min on cache hit.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # pnpm + Node. pnpm/action-setup is preferred over corepack because
+      # we pin `packageManager` in root package.json — the action reads
+      # that and installs the exact version for reproducibility.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      # Frontend build. Vite will surface TS errors here; we treat the
+      # build as the type-check because @arcterm/desktop doesn't have a
+      # standalone `tsc --noEmit` step today.
+      - name: Build frontend
+        run: pnpm --filter @arcterm/desktop vite:build
+
+      - name: Cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --all-targets
+
+      - name: Cargo clippy
+        working-directory: apps/desktop/src-tauri
+        # -D warnings promotes warnings to errors — we want CI to fail
+        # on any new warning, not just hard errors. Keeps the code
+        # base warning-free over time.
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test

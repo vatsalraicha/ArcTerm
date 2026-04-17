@@ -1,15 +1,15 @@
 //! Router: orchestrates which backend answers requests.
 //!
 //! State:
-//!   - `claude`:    the Claude CLI backend (always present; availability
-//!                  is checked lazily via is_available()).
-//!   - `local`:     the local Gemma backend, loaded from a GGUF file.
-//!                  `None` when no model is installed or the model file
-//!                  failed to load at startup.
-//!   - `active`:    the currently-dispatched backend. Swapped atomically
-//!                  by `set_mode`. Starts as whatever the settings file
-//!                  says, falling back when the requested backend isn't
-//!                  actually available on this machine.
+//! - `claude`:    the Claude CLI backend (always present; availability
+//!   is checked lazily via is_available()).
+//! - `local`:     the local Gemma backend, loaded from a GGUF file.
+//!   `None` when no model is installed or the model file failed to
+//!   load at startup.
+//! - `active`:    the currently-dispatched backend. Swapped atomically
+//!   by `set_mode`. Starts as whatever the settings file says, falling
+//!   back when the requested backend isn't actually available on this
+//!   machine.
 //!
 //! Runtime switching: the `/arcterm-model` slash command and the settings
 //! panel both funnel into `set_mode(mode)`. We validate the requested
@@ -85,13 +85,10 @@ impl AiRouter {
     /// can't be satisfied (e.g. "local" with no loaded model).
     pub fn set_mode(&self, mode: Mode) -> Result<(), String> {
         let local = self.local.read().clone();
-        match (mode, &local) {
-            (Mode::Local, None) => {
-                return Err(
-                    "No local model loaded. Run `/arcterm-download gemma` first.".into(),
-                );
-            }
-            _ => {}
+        if let (Mode::Local, None) = (mode, &local) {
+            return Err(
+                "No local model loaded. Run `/arcterm-download gemma` first.".into(),
+            );
         }
         let next = build_active(mode, &self.claude, &local);
         *self.active.write() = next;
@@ -117,7 +114,7 @@ impl AiRouter {
             let next = build_active(
                 current_mode,
                 &self.claude,
-                &*self.local.read(),
+                &self.local.read(),
             );
             *self.active.write() = next;
         }

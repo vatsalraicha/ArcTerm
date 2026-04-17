@@ -79,10 +79,7 @@ pub fn complete(text: &str, cursor_pos: usize, cwd: &Path) -> CompletionResult {
     let base_for_fs = shell_unescape(base);
 
     let dir = resolve_dir(&dir_for_fs, cwd);
-    let mut completions = match list_dir(&dir, &base_for_fs) {
-        Ok(c) => c,
-        Err(_) => Vec::new(),
-    };
+    let mut completions = list_dir(&dir, &base_for_fs).unwrap_or_default();
 
     // Sort: directories first (they're usually what you want to cd into),
     // then alphabetic. Hidden files sort after non-hidden within each group.

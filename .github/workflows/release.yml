@@ -1,0 +1,104 @@
+# Release build pipeline — ArcTerm.
+#
+# Triggered by pushing a version tag (`git push origin v0.1.0-alpha.phase8`).
+# Builds a universal macOS `.app` bundle + `.dmg` installer for both
+# Apple Silicon (aarch64) and Intel (x86_64), then attaches them to a
+# DRAFT GitHub Release. Review the draft in the GitHub UI, edit release
+# notes, then click "Publish release" to make it visible.
+#
+# Targets: macOS only. See ci.yml for the rationale; tl;dr Metal + our
+# own time budget. Linux / Windows users fork and build locally today.
+#
+# Code signing + notarization: not configured for alpha. Users will see
+# "ArcTerm is from an unidentified developer" on first launch and need
+# to right-click → Open to bypass Gatekeeper. Real notarization requires
+# an Apple Developer Program membership ($99/year) and cert plumbing
+# that's out of scope until v1.0.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# A release tag spawns parallel jobs per target. Don't cancel on new
+# tags — each tag is a deliberate artifact we want to preserve.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon first — our primary target and the faster
+          # runner config. Intel second in case anyone's still on a
+          # 2019 MBP; lipo'd universal binaries are overkill at alpha.
+          - target: aarch64-apple-darwin
+          - target: x86_64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          # Tag the cache by target so aarch64 and x86_64 builds don't
+          # clobber each other's artifacts.
+          key: ${{ matrix.target }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      # tauri-action runs `tauri build` with our tauri.conf.json config,
+      # produces .app + .dmg, creates a GitHub Release (draft) on the
+      # tag, and uploads the artifacts. The action is maintained by the
+      # Tauri team; safer than hand-rolling.
+      - name: Build + bundle + upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "ArcTerm ${{ github.ref_name }}"
+          releaseBody: |
+            ArcTerm ${{ github.ref_name }}.
+
+            Download the `.dmg` for your Mac architecture, open it, and
+            drag ArcTerm into Applications. On first launch macOS will
+            warn that the app is from an unidentified developer —
+            right-click → Open to proceed. (Proper notarization ships
+            with v1.0.)
+
+            See CHANGELOG for what's new.
+          # Draft so we can review + edit notes before going public.
+          # Flip to `false` once we're comfortable with auto-publish.
+          releaseDraft: true
+          # Any pre-release label (alpha / beta / rc) marks the release
+          # as a pre-release on GitHub so it doesn't appear as "latest".
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          args: --target ${{ matrix.target }}
