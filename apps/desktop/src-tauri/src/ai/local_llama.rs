@@ -247,30 +247,43 @@ fn run_inference(
     }
 }
 
-/// Wrap the request in Gemma 4's chat template. This produces the exact
-/// input the instruction-tuned model was trained on, so quality is
-/// meaningfully better than feeding a raw prompt string.
+/// Wrap the request in Gemma 4's chat template + apply prompt tweaks
+/// that compensate for small-model + aggressive-quantization failure modes.
+///
+/// Lessons from testing IQ2_M on Phase 5b:
+///   - The compact context block (no recent-commands history) helps a
+///     lot: the model was treating history entries as exemplars and
+///     returning pattern-matched one-word answers (`history` instead of
+///     an awk-pipe chain).
+///   - Positive-phrased instructions beat negation lists. "Respond with
+///     exactly one command on one line" works; "no explanation, no
+///     markdown fences" causes the model to fixate on fences and emit
+///     empty ```` ``` ```` answers.
+///   - Examples in the prompt help (one-shot), but add token cost. We
+///     include one tiny example; if needed for future tuning, this is
+///     the dial to adjust.
 fn build_prompt(req: &AiRequest) -> String {
     let mut user = String::new();
     if let Some(ctx) = &req.context {
-        user.push_str(&ctx.to_prompt_block());
+        user.push_str(&ctx.to_compact_prompt_block());
         user.push('\n');
     }
     match req.mode {
         AiMode::Command => {
             user.push_str(
-                "Convert the following request into a single shell command \
-                 for zsh on macOS. Output ONLY the command, no explanation, \
-                 no markdown fences.\n\n",
+                "Respond with exactly one shell command for zsh on macOS. \
+                 Write only the command on a single line.\n\n\
+                 Example:\n\
+                 User: show the largest files in this directory\n\
+                 Assistant: du -sh * | sort -hr | head\n\n\
+                 User: ",
             );
-            user.push_str("Request: ");
         }
         AiMode::Explain => {
             user.push_str(
-                "Explain the command or error above. Give a short plain \
-                 explanation (2-4 sentences) and then, if applicable, a \
-                 suggested fix as a one-line shell command in a markdown \
-                 code block.\n\n",
+                "Explain the command or error above in 2-4 plain sentences. \
+                 If there is a fix, end with a markdown code block \
+                 containing a single shell command.\n\n",
             );
         }
         AiMode::Chat => {}

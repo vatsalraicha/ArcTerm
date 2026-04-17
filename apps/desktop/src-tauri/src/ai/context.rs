@@ -44,6 +44,47 @@ pub struct AiContext {
 }
 
 impl AiContext {
+    /// Minimal context block: cwd, shell, OS, git branch. No history.
+    ///
+    /// Used by small local models that struggle with longer preambles —
+    /// at 2-bit quantization a 2B-param model treats the recent-commands
+    /// list as "examples of what to output" instead of "background
+    /// context", which produces pattern-matched one-word answers.
+    /// Frontier models (Claude) don't have this problem, so they keep
+    /// the full block.
+    pub fn to_compact_prompt_block(&self) -> String {
+        let mut out = String::new();
+        out.push_str("## Context\n");
+        if let Some(cwd) = &self.cwd {
+            out.push_str(&format!("- Working directory: {cwd}\n"));
+        }
+        out.push_str(&format!(
+            "- Shell: {}\n",
+            self.shell.as_deref().unwrap_or("/bin/zsh")
+        ));
+        out.push_str("- OS: macOS\n");
+        if let Some(branch) = &self.git_branch {
+            if !branch.is_empty() {
+                out.push_str(&format!("- Git branch: {branch}\n"));
+            }
+        }
+        // Failing command + output are preserved even in compact mode:
+        // explain flows NEED this to give a useful answer.
+        if let (Some(cmd), Some(output)) = (&self.failing_command, &self.failing_output) {
+            out.push_str(&format!("\nCommand that failed: `{cmd}`\n"));
+            if let Some(code) = self.failing_exit_code {
+                out.push_str(&format!("Exit code: {code}\n"));
+            }
+            out.push_str("Output:\n```\n");
+            out.push_str(truncate_bytes(output, MAX_ERROR_BYTES));
+            if !output.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
+        out
+    }
+
     /// Render the context as a prompt fragment for text-based LLMs. The
     /// resulting block is injected before the user's question so the model
     /// can ground its answer without us doing tool-use plumbing.
