@@ -48,20 +48,31 @@ const MAX_NEW_TOKENS: i32 = 512;
 /// memory use modest.
 const CTX_SIZE: u32 = 4096;
 
+/// ⚠ Field order is load-bearing. Rust drops struct fields in declaration
+/// order, and `llama.cpp` calls `abort()` if `llama_backend_free()` runs
+/// while any LlamaModel still exists (the model holds an internal raw
+/// pointer to the backend). We saw this as a SIGABRT when closing the
+/// app during Phase 5b. Ordering here guarantees clean teardown:
+///
+///     chat_template  (may reference the model)
+///  -> model          (holds internal ref to backend)
+///  -> backend        (freed last)
+///
+/// Non-Llama fields live at the end because their drop order is
+/// irrelevant.
 pub struct LocalLlamaBackend {
-    /// Shared LlamaBackend — init exactly once per process per the crate
-    /// docs. Arc so the inference task can hold its own reference while
-    /// the main thread continues to use it for future requests.
-    backend: Arc<LlamaBackend>,
-    /// Loaded model. LlamaModel is !Sync, so we guard with a Mutex; the
-    /// lock is held only for long enough to create a new context (cheap).
-    model: Arc<Mutex<LlamaModel>>,
     /// The model's own chat template, pulled from the GGUF metadata at
     /// load time. Using this instead of a hardcoded Gemma template means
     /// we get whatever format the model was actually trained on — same
     /// thing Ollama does under the hood, without Ollama as a dependency.
     /// Optional because pre-instruction-tuned GGUFs don't ship one.
     chat_template: Option<LlamaChatTemplate>,
+    /// Loaded model. LlamaModel is !Sync, so we guard with a Mutex; the
+    /// lock is held only for long enough to create a new context (cheap).
+    model: Arc<Mutex<LlamaModel>>,
+    /// Shared LlamaBackend — init exactly once per process per the crate
+    /// docs. Must drop LAST (see field-order comment above).
+    backend: Arc<LlamaBackend>,
     /// Path we loaded from. Surfaced in logs + used by tests.
     pub model_path: PathBuf,
     /// Display name used by the `AiBackend::display_name` impl.
@@ -111,10 +122,13 @@ impl LocalLlamaBackend {
                 .unwrap_or(0),
         );
 
+        // Construction order matches the declared field order on purpose
+        // — not strictly required for correctness (that's the DROP order
+        // that matters) but keeps init visually aligned with teardown.
         Ok(Self {
-            backend,
-            model: Arc::new(Mutex::new(model)),
             chat_template,
+            model: Arc::new(Mutex::new(model)),
+            backend,
             model_path: path,
             display_label: "Gemma (local)",
         })
