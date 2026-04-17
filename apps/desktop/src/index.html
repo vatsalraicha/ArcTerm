@@ -15,7 +15,15 @@
       Sidebar, input editor, and AI panel arrive in later phases.
     -->
     <main id="app">
-      <div id="terminal"></div>
+      <!--
+        #terminal-frame owns the window cushion (padding). Keeping the
+        xterm host (#terminal) padding-free means its content-box equals its
+        border-box, so ResizeObserver fires correctly and fit() sees the
+        real drawable area every time the window reflows.
+      -->
+      <div id="terminal-frame">
+        <div id="terminal"></div>
+      </div>
     </main>
     <script type="module" src="./main.ts"></script>
   </body>

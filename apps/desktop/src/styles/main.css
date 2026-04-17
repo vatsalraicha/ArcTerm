@@ -36,21 +36,32 @@ html, body {
 }
 
 /*
- * Terminal host. xterm.js injects its own canvas/WebGL elements inside.
- * Padding gives the terminal text some breathing room from window edges.
+ * #terminal-frame is the padded container. #terminal (the xterm host) has
+ * no padding so its border-box == content-box, which keeps ResizeObserver
+ * honest and lets fit() calculate rows from the real drawable area.
  */
-#terminal {
+#terminal-frame {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 8px 12px;
+  /* Cushion keeps the active prompt line clear of the window chrome when
+     the buffer fills. Top is tighter than bottom because the title bar
+     already provides breathing room above. */
+  padding: 8px 12px 20px;
   overflow: hidden;
+  display: flex;
 }
 
-/* xterm renders selection itself; let it own pointer + selection inside. */
+#terminal {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* xterm renders selection itself; let it own pointer + selection inside.
+   No explicit height override — flex sizes the xterm root correctly now. */
 #terminal .xterm,
 #terminal .xterm-viewport,
 #terminal .xterm-screen {
-  height: 100% !important;
   user-select: text;
   -webkit-user-select: text;
 }

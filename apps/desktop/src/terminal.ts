@@ -71,8 +71,12 @@ export async function setupTerminal(host: HTMLElement): Promise<void> {
   }
 
   // Initial fit so cols/rows reflect the actual window size before we spawn
-  // the PTY — otherwise the shell starts at xterm's default 80x24.
+  // the PTY — otherwise the shell starts at xterm's default 80x24. We also
+  // schedule one more fit on the next frame: fonts and flex layout settle
+  // asynchronously, and a stale first fit can leave the canvas clipped at
+  // the bottom of the window.
   fit.fit();
+  requestAnimationFrame(() => fit.fit());
 
   const ptyId = await invoke<string>("pty_spawn", {
     cols: term.cols,
