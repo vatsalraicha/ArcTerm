@@ -28,6 +28,15 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# The default GITHUB_TOKEN is scoped read-only in most orgs (GitHub changed
+# the default in 2023). tauri-action uses it to create releases + upload
+# artifacts, which needs `contents: write`. Without this block the workflow
+# will build the .app + .dmg successfully and then fail on the last step
+# with "Resource not accessible by integration" — which is exactly what
+# the v0.1.0-alpha.phase7 attempt hit.
+permissions:
+  contents: write
+
 env:
   # llama-cpp-sys-2 builds llama.cpp's C++ which uses std::filesystem::path.
   # The Xcode SDK marks that API as "introduced in macOS 10.15" and refuses
