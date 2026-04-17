@@ -1,0 +1,12 @@
+{
+  "name": "arcterm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ArcTerm — open-source AI-powered terminal (workspace root)",
+  "license": "MIT",
+  "scripts": {
+    "dev:desktop": "pnpm --filter @arcterm/desktop dev",
+    "build:desktop": "pnpm --filter @arcterm/desktop build"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

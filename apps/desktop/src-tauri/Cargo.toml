@@ -1,0 +1,44 @@
+[package]
+name = "arcterm-desktop"
+version = "0.1.0"
+description = "ArcTerm desktop app — Tauri v2 shell"
+authors = ["ArcTerm contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "arcterm_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# PTY: portable-pty handles fork+exec on Unix and ConPTY on Windows.
+portable-pty = "0.8"
+
+# Base64 for binary-safe pty->frontend transport. xterm-side decodes back to
+# Uint8Array so we never lose bytes mid-UTF-8-sequence.
+base64 = "0.22"
+
+# Concurrency primitives. Reader threads are blocking (portable-pty exposes
+# std::io::Read); we wrap children + writers in a Mutex for IPC access.
+parking_lot = "0.12"
+
+# UUIDs identify PTY instances. Phase 4 (sessions/tabs) reuses the same id.
+uuid = { version = "1", features = ["v4"] }
+
+# Logging. tauri's plugin-log is overkill for Phase 1; env_logger keeps it
+# trivial and prints to the dev terminal.
+log = "0.4"
+env_logger = "0.11"
+
+[features]
+# Tauri v2 expects a `custom-protocol` feature flag for the production build.
+custom-protocol = ["tauri/custom-protocol"]

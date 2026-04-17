@@ -1,0 +1,56 @@
+/*
+ * Phase 1 dark theme.
+ * Colors mirror the spec's dark palette so Phases 2+ can swap to CSS-variable
+ * theming without re-writing component styles.
+ */
+:root {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --text: #e0e0e0;
+  --muted: #8888a0;
+  --accent: #4fc3f7;
+  --border: rgba(255, 255, 255, 0.08);
+
+  --font-mono: "JetBrains Mono", Menlo, Monaco, "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
+  /* Disable text selection on chrome; xterm manages its own selection. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/*
+ * Terminal host. xterm.js injects its own canvas/WebGL elements inside.
+ * Padding gives the terminal text some breathing room from window edges.
+ */
+#terminal {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 12px;
+  overflow: hidden;
+}
+
+/* xterm renders selection itself; let it own pointer + selection inside. */
+#terminal .xterm,
+#terminal .xterm-viewport,
+#terminal .xterm-screen {
+  height: 100% !important;
+  user-select: text;
+  -webkit-user-select: text;
+}
