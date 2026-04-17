@@ -30,7 +30,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -56,6 +56,12 @@ pub struct LocalLlamaBackend {
     /// Loaded model. LlamaModel is !Sync, so we guard with a Mutex; the
     /// lock is held only for long enough to create a new context (cheap).
     model: Arc<Mutex<LlamaModel>>,
+    /// The model's own chat template, pulled from the GGUF metadata at
+    /// load time. Using this instead of a hardcoded Gemma template means
+    /// we get whatever format the model was actually trained on — same
+    /// thing Ollama does under the hood, without Ollama as a dependency.
+    /// Optional because pre-instruction-tuned GGUFs don't ship one.
+    chat_template: Option<LlamaChatTemplate>,
     /// Path we loaded from. Surfaced in logs + used by tests.
     pub model_path: PathBuf,
     /// Display name used by the `AiBackend::display_name` impl.
@@ -80,6 +86,23 @@ impl LocalLlamaBackend {
         let model = LlamaModel::load_from_file(&backend, &path, &params)
             .map_err(|e| format!("load_from_file {}: {e}", path.display()))?;
 
+        // Pull the embedded chat template. `None` = the model's default
+        // template name. Models that ship multiple templates (rare) can
+        // be queried by name; we don't need that today.
+        let chat_template = match model.chat_template(None) {
+            Ok(t) => {
+                log::info!("local model chat template loaded from GGUF metadata");
+                Some(t)
+            }
+            Err(e) => {
+                log::warn!(
+                    "no chat template in GGUF ({}); falling back to raw Gemma template",
+                    e
+                );
+                None
+            }
+        };
+
         log::info!(
             "local llama model loaded: {} ({} MB)",
             path.display(),
@@ -91,6 +114,7 @@ impl LocalLlamaBackend {
         Ok(Self {
             backend,
             model: Arc::new(Mutex::new(model)),
+            chat_template,
             model_path: path,
             display_label: "Gemma (local)",
         })
@@ -135,12 +159,42 @@ impl AiBackend for LocalLlamaBackend {
     fn stream(&self, req: AiRequest) -> BoxStream<'static, Result<String, String>> {
         let backend = self.backend.clone();
         let model = self.model.clone();
-        let prompt = build_prompt(&req);
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<String, String>>();
 
+        // Build the formatted prompt AHEAD of spawn_blocking so template
+        // failures surface on this task, not the worker — cleaner error
+        // propagation back to the caller.
+        let user_content = compose_user_message(&req);
+        let prompt = match &self.chat_template {
+            Some(tmpl) => {
+                // Apply the GGUF's own template. Hold the model lock for
+                // the apply call; it's a cheap string-format operation.
+                let msg = match LlamaChatMessage::new(
+                    "user".to_string(),
+                    user_content.clone(),
+                ) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("chat message: {e}")));
+                        return UnboundedReceiverStream::new(rx).boxed();
+                    }
+                };
+                let model_guard = model.lock();
+                match model_guard.apply_chat_template(tmpl, &[msg], true) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("apply_chat_template: {e}")));
+                        return UnboundedReceiverStream::new(rx).boxed();
+                    }
+                }
+            }
+            None => hardcoded_gemma_template(&user_content),
+        };
+        let template_aware = self.chat_template.is_some();
+
         tokio::task::spawn_blocking(move || {
-            run_inference(backend, model, prompt, tx);
+            run_inference(backend, model, prompt, template_aware, tx);
         });
 
         UnboundedReceiverStream::new(rx).boxed()
@@ -149,10 +203,16 @@ impl AiBackend for LocalLlamaBackend {
 
 /// Actual inference loop. Runs on a blocking thread; pumps tokens into `tx`.
 /// Errors are delivered on the same channel as `Err(...)` items.
+///
+/// `template_aware` tells us whether `prompt` was produced by the model's
+/// own chat template (in which case it already contains any BOS tokens
+/// the template expects and we must NOT prepend another one) or by our
+/// hardcoded fallback template (which doesn't include BOS, so we add it).
 fn run_inference(
     backend: Arc<LlamaBackend>,
     model: Arc<Mutex<LlamaModel>>,
     prompt: String,
+    template_aware: bool,
     tx: mpsc::UnboundedSender<Result<String, String>>,
 ) {
     let model = model.lock();
@@ -169,7 +229,14 @@ fn run_inference(
     };
 
     // 2. Tokenize the prompt.
-    let tokens = match model.str_to_token(&prompt, AddBos::Always) {
+    let add_bos = if template_aware {
+        // The chat template already emits BOS tokens where the model
+        // expects them. Double-BOS produces garbage output.
+        AddBos::Never
+    } else {
+        AddBos::Always
+    };
+    let tokens = match model.str_to_token(&prompt, add_bos) {
         Ok(t) => t,
         Err(e) => {
             let _ = tx.send(Err(format!("tokenize: {e}")));
@@ -247,12 +314,11 @@ fn run_inference(
     }
 }
 
-/// Wrap the request in Gemma 4's chat template. Reverted to the original
-/// Phase 5b prompt shape after the "tuned" variants made things worse.
-/// Keeping `to_compact_prompt_block` around in context.rs as a future
-/// dial, but not using it: the full context block works as well as
-/// compact in practice and gives Claude/Gemma the same grounding.
-fn build_prompt(req: &AiRequest) -> String {
+/// Compose the plain-text content of the single user message we send.
+/// This becomes the payload the model's chat template wraps; we DON'T
+/// add template markers here — apply_chat_template handles that based
+/// on the model's own training format.
+fn compose_user_message(req: &AiRequest) -> String {
     let mut user = String::new();
     if let Some(ctx) = &req.context {
         user.push_str(&ctx.to_prompt_block());
@@ -278,9 +344,15 @@ fn build_prompt(req: &AiRequest) -> String {
         AiMode::Chat => {}
     }
     user.push_str(&req.prompt);
+    user
+}
 
-    // Gemma 4 chat template.
+/// Fallback: a hand-rolled Gemma 4 chat wrapper. Used only if the GGUF
+/// has no embedded chat_template metadata (rare for modern instruction-
+/// tuned releases). Kept tightly scoped so it can't accidentally be used
+/// when the real template is available.
+fn hardcoded_gemma_template(user_content: &str) -> String {
     format!(
-        "<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n"
+        "<start_of_turn>user\n{user_content}<end_of_turn>\n<start_of_turn>model\n"
     )
 }

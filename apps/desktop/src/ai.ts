@@ -145,12 +145,22 @@ export function aiStream(
 }
 
 /**
- * Utility: strip markdown fences from a model-generated one-line command.
- * The model is instructed not to emit them, but it still does occasionally.
- * We take the first non-empty line and trim shell-ish decoration.
+ * Utility: strip markdown fences + reasoning blocks from a model-generated
+ * one-line command.
+ *
+ * Reasoning blocks: Gemma 4 (and other models with chat templates that
+ * trigger a "thinking" mode) emit `<think>...</think>` before the final
+ * answer. Those tokens aren't shell commands; we drop them.
+ *
+ * Markdown fences: models occasionally wrap single-line commands in
+ * ```` ```bash ... ``` ```` despite instructions to the contrary. We
+ * unwrap to the inner line.
  */
 export function extractCommand(raw: string): string {
     let s = raw.trim();
+    // Drop any <think>...</think> blocks (reasoning traces). Non-greedy
+    // multiline so multiple blocks get stripped independently.
+    s = s.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     // Drop leading/trailing ``` fences with optional language tag.
     s = s.replace(/^```[a-zA-Z0-9_-]*\s*\n?/, "");
     s = s.replace(/\n?```\s*$/, "");
