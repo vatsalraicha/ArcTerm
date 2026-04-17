@@ -1,0 +1,233 @@
+/*
+ * Session sidebar.
+ *
+ * Fixed width (var(--sidebar-width)), vertical column layout:
+ *   [header: title + "new" button]
+ *   [search input]
+ *   [scrollable session list]
+ */
+
+#sidebar {
+  flex: 0 0 var(--sidebar-width);
+  width: var(--sidebar-width);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.sidebar-new {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sidebar-new:hover {
+  background: rgba(79, 195, 247, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sidebar-search-wrap {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-search {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text);
+  font-family: inherit;
+  outline: none;
+}
+
+.sidebar-search:focus {
+  border-color: var(--accent);
+}
+
+.sidebar-search::placeholder {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.session-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  margin: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Keep rows at a predictable height — truncate long cwds/commands. */
+  overflow: hidden;
+}
+
+.session-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.session-item.active {
+  background: rgba(79, 195, 247, 0.12);
+}
+
+.session-item.active::before {
+  /* Left accent bar on the active session. Absolute so the body's padding
+     isn't affected, but we'd need position:relative on the parent for it
+     to anchor. Simpler: use a left border trick via ::before with a fixed
+     left of 0 relative to the row. */
+  content: "";
+  position: absolute;
+  left: 6px;
+  width: 2px;
+  top: 8px;
+  bottom: 8px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.session-item {
+  position: relative;
+}
+
+.session-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-top: 6px;
+  background: var(--muted);
+  transition: background-color 120ms ease;
+}
+
+.session-item.running .session-dot {
+  background: var(--warning);
+  box-shadow: 0 0 0 2px rgba(255, 183, 77, 0.2);
+}
+
+.session-item.exit-ok .session-dot {
+  background: var(--success);
+}
+
+.session-item.exit-err .session-dot {
+  background: var(--error);
+}
+
+.session-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-name {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-name[contenteditable="true"] {
+  outline: 1px solid var(--accent);
+  border-radius: 2px;
+  padding: 0 2px;
+  white-space: pre;
+}
+
+.session-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-last {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.7;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.session-item:hover .session-close,
+.session-item.active .session-close {
+  opacity: 1;
+}
+
+.session-close:hover {
+  background: rgba(239, 83, 80, 0.15);
+  color: var(--error);
+}
+
+.session-list-empty {
+  padding: 16px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+  text-align: center;
+}

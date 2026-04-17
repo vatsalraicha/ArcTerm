@@ -1,17 +1,22 @@
 /*
- * Phase 1 dark theme.
- * Colors mirror the spec's dark palette so Phases 2+ can swap to CSS-variable
- * theming without re-writing component styles.
+ * Phase 4 root layout.
+ * Colors mirror the spec's dark palette so Phases 7+ can swap to
+ * CSS-variable theming without re-writing component styles.
  */
 :root {
   --bg: #1a1a2e;
   --surface: #16213e;
+  --surface-raised: #1e2a4a;
   --text: #e0e0e0;
   --muted: #8888a0;
   --accent: #4fc3f7;
+  --success: #66bb6a;
+  --error: #ef5350;
+  --warning: #ffb74d;
   --border: rgba(255, 255, 255, 0.08);
 
   --font-mono: "JetBrains Mono", Menlo, Monaco, "Courier New", monospace;
+  --sidebar-width: 220px;
 }
 
 * { box-sizing: border-box; }
@@ -23,45 +28,69 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
-  /* Disable text selection on chrome; xterm manages its own selection. */
+  /* Disable text selection on chrome; xterm + specific widgets opt in. */
   user-select: none;
   -webkit-user-select: none;
 }
 
+/* Row-level layout: sidebar on the left, workspace filling the rest. */
 #app {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100vh;
   width: 100vw;
+  min-height: 0;
+  min-width: 0;
+}
+
+#workspace {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /*
- * #terminal-frame is the padded container. #terminal (the xterm host) has
- * no padding so its border-box == content-box, which keeps ResizeObserver
- * honest and lets fit() calculate rows from the real drawable area.
+ * Terminal stack: holds one child per session. Only the active child is
+ * display:flex; the rest are display:none. Hidden xterms keep consuming
+ * PTY output into their buffers so nothing is lost — they just don't
+ * render until shown again.
  */
-#terminal-frame {
+#terminal-stack {
   flex: 1 1 auto;
   min-height: 0;
-  /* Cushion keeps the active prompt line clear of the window chrome when
-     the buffer fills. Top is tighter than bottom because the title bar
-     already provides breathing room above. */
-  padding: 8px 12px 20px;
-  overflow: hidden;
-  display: flex;
+  position: relative;
 }
 
-#terminal {
+/*
+ * Each session frame fills the stack. Match Phase 2's padded-host pattern
+ * so the xterm canvas sizes off a border-box == content-box element,
+ * which keeps ResizeObserver + fit() honest.
+ */
+.terminal-frame {
+  width: 100%;
+  height: 100%;
+  padding: 8px 12px 20px;
+  display: flex;
+  overflow: hidden;
+}
+
+.terminal-frame.hidden {
+  display: none !important;
+}
+
+.terminal-host {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
 }
 
 /* xterm renders selection itself; let it own pointer + selection inside.
-   No explicit height override — flex sizes the xterm root correctly now. */
-#terminal .xterm,
-#terminal .xterm-viewport,
-#terminal .xterm-screen {
+   No explicit height override — flex sizes the xterm root correctly. */
+.terminal-host .xterm,
+.terminal-host .xterm-viewport,
+.terminal-host .xterm-screen {
   user-select: text;
   -webkit-user-select: text;
 }

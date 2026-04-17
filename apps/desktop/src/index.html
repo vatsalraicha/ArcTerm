@@ -7,31 +7,51 @@
           content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost" />
     <title>ArcTerm</title>
     <link rel="stylesheet" href="./styles/main.css" />
+    <link rel="stylesheet" href="./styles/sidebar.css" />
     <link rel="stylesheet" href="./styles/input-editor.css" />
     <link rel="stylesheet" href="./styles/history-overlay.css" />
   </head>
   <body>
     <!--
-      Phase 2 layout:
-        - #terminal-frame hosts xterm (scrollable shell output)
-        - #input-dock holds the prompt bar + custom input editor, pinned
-          below the terminal. This replaces the shell's own prompt.
+      Phase 4 layout:
+        #app is a horizontal flex row.
+          #sidebar        — fixed-width session list on the left
+          #workspace      — fills remaining space, stacks terminals + input
+            #terminal-stack — all session xterms live here; only the active
+                              session's element is visible (others are
+                              display:none so their buffers keep streaming
+                              without rendering work).
+            #input-dock   — prompt bar + custom input editor, pinned below
+                            the terminal stack. Drives whichever session
+                            is currently active.
     -->
     <main id="app">
-      <div id="terminal-frame">
-        <div id="terminal"></div>
-      </div>
-      <div id="input-dock">
-        <div id="prompt-bar">
-          <span class="prompt-icon" aria-hidden="true">📁</span>
-          <span id="prompt-cwd" class="prompt-cwd">~</span>
-          <span id="prompt-branch" class="prompt-branch hidden" aria-label="git branch"></span>
+      <aside id="sidebar" aria-label="ArcTerm sessions">
+        <header class="sidebar-header">
+          <span class="sidebar-title">ArcTerm</span>
+          <button id="new-session-btn" class="sidebar-new" title="New session (⌘T)" aria-label="New session">+</button>
+        </header>
+        <div class="sidebar-search-wrap">
+          <input id="sidebar-search" class="sidebar-search"
+                 type="text" placeholder="Filter sessions…"
+                 spellcheck="false" autocorrect="off" autocapitalize="off" />
         </div>
-        <div id="input-area">
-          <span class="prompt-sigil" aria-hidden="true">❯</span>
-          <div id="input-editor-host"></div>
+        <ul id="session-list" class="session-list"></ul>
+      </aside>
+      <section id="workspace">
+        <div id="terminal-stack"></div>
+        <div id="input-dock">
+          <div id="prompt-bar">
+            <span class="prompt-icon" aria-hidden="true">📁</span>
+            <span id="prompt-cwd" class="prompt-cwd">~</span>
+            <span id="prompt-branch" class="prompt-branch hidden" aria-label="git branch"></span>
+          </div>
+          <div id="input-area">
+            <span class="prompt-sigil" aria-hidden="true">❯</span>
+            <div id="input-editor-host"></div>
+          </div>
         </div>
-      </div>
+      </section>
     </main>
     <script type="module" src="./main.ts"></script>
   </body>
