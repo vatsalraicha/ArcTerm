@@ -11,7 +11,10 @@ use futures::StreamExt;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use std::path::PathBuf;
+
 use crate::ai::{AiChunk, AiContext, AiRequest, AiResponse, AiRouter};
+use crate::completion::{complete as fs_complete_impl, CompletionResult};
 use crate::history::{Entry, HistoryStore};
 use crate::pty::PtyManager;
 
@@ -211,4 +214,26 @@ pub async fn ai_stream(
 #[allow(dead_code)]
 pub fn empty_context() -> AiContext {
     AiContext::default()
+}
+
+// -- Filesystem completion ---------------------------------------------
+
+/// Tab-completion for file paths. Given the full editor text + cursor
+/// position, returns the token being completed and its candidates. The
+/// frontend splices `replacement` into the editor at `[token_start,
+/// token_end)` — we return byte offsets so it doesn't have to re-derive.
+#[tauri::command]
+pub fn fs_complete(
+    text: String,
+    cursor_pos: usize,
+    cwd: Option<String>,
+) -> Result<CompletionResult, String> {
+    // cwd is None if the shell hasn't reported OSC 7 yet. Fall back to the
+    // process cwd — better than failing outright; the user may still get
+    // useful completions relative to wherever ArcTerm was launched.
+    let cwd_path = cwd
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "no cwd available".to_string())?;
+    Ok(fs_complete_impl(&text, cursor_pos, &cwd_path))
 }

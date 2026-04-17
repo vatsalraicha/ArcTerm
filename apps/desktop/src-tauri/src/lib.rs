@@ -3,6 +3,7 @@
 //! process if we ever decide to share the Rust core.
 
 pub mod ai;
+pub mod completion;
 pub mod history;
 pub mod ipc;
 pub mod pty;
@@ -74,6 +75,7 @@ pub fn run() {
             ipc::ai_active_backend,
             ipc::ai_ask,
             ipc::ai_stream,
+            ipc::fs_complete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ArcTerm");

@@ -19,6 +19,7 @@ import { HistoryOverlay } from "./history-overlay";
 import { Sidebar } from "./sidebar";
 import { AiPanel, type ExplainTarget } from "./ai-panel";
 import { aiIsAvailable, type AiContext } from "./ai";
+import { CompletionOverlay, type CompletionItem } from "./completion-overlay";
 
 window.addEventListener("DOMContentLoaded", () => {
   const stackHost = requireEl("terminal-stack");
@@ -136,6 +137,18 @@ async function boot(mounts: Mounts): Promise<void> {
     );
   };
 
+  // --- Tab-completion dropdown ----------------------------------------
+  // Mounted into the input dock so it visually anchors above the editor.
+  // The editor delegates to it via four callbacks (completeFor, show,
+  // handleKey, close) — editor doesn't import it directly.
+  const inputDock = mounts.editorHost.closest("#input-dock") as HTMLElement;
+  const completionOverlay = new CompletionOverlay({
+    host: inputDock,
+    onPick: () => {
+      /* replaced per-call via showCompletions callback below */
+    },
+  });
+
   const editor = new InputEditor({
     host: mounts.editorHost,
     onSubmit: (command) => {
@@ -163,6 +176,32 @@ async function boot(mounts: Mounts): Promise<void> {
         return null;
       }
     },
+    completeFor: async (text, cursorPos) => {
+      try {
+        const cwd = manager.active?.state.cwd ?? null;
+        const result = await invoke<{
+          token_start: number;
+          token_end: number;
+          completions: CompletionItem[];
+        }>("fs_complete", { text, cursorPos, cwd });
+        return {
+          tokenStart: result.token_start,
+          tokenEnd: result.token_end,
+          completions: result.completions,
+        };
+      } catch (err) {
+        console.error("fs_complete failed", err);
+        return { tokenStart: 0, tokenEnd: 0, completions: [] };
+      }
+    },
+    showCompletions: (items, onPick) => {
+      // Pass a per-call onPick so the editor can re-derive splice offsets
+      // from the live caret at commit time (the user may have typed more
+      // characters between opening and picking).
+      completionOverlay.open(items, (item) => onPick(item.replacement));
+    },
+    completionHandlesKey: (ev) => completionOverlay.handleKey(ev),
+    closeCompletions: () => completionOverlay.close(),
   });
 
   // Close the block on command end for the session that emitted it. We

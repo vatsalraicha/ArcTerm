@@ -44,6 +44,43 @@ export interface InputEditorOptions {
      * Returning null/empty string hides the ghost.
      */
     suggestFor?: (prefix: string) => Promise<string | null>;
+    /**
+     * Ask for filesystem Tab completions for the text under the caret.
+     * Returns the token span + all matching entries; the editor splices
+     * one in (single match) or defers to the dropdown (multi match).
+     */
+    completeFor?: (text: string, cursorPos: number) => Promise<{
+        tokenStart: number;
+        tokenEnd: number;
+        completions: Array<{
+            label: string;
+            replacement: string;
+            kind: "dir" | "file" | "executable";
+            hidden: boolean;
+        }>;
+    }>;
+    /**
+     * Show a disambiguation dropdown for multiple completions. Caller
+     * supplies the UI; editor just delegates. The returned function, if
+     * present, is asked to handle keyboard events first (so ↑/↓/Enter can
+     * navigate the dropdown instead of the editor).
+     */
+    showCompletions?: (
+        items: Array<{
+            label: string;
+            replacement: string;
+            kind: "dir" | "file" | "executable";
+            hidden: boolean;
+        }>,
+        onPick: (replacement: string) => void,
+    ) => void;
+    /**
+     * Probe for open completion dropdown + route a keydown through it.
+     * Returns true if the dropdown consumed the event.
+     */
+    completionHandlesKey?: (ev: KeyboardEvent) => boolean;
+    /** Close an open completion dropdown (on editor content changes). */
+    closeCompletions?: () => void;
 }
 
 const GHOST_CLASS = "arcterm-ghost";
@@ -152,13 +189,19 @@ export class InputEditor {
             return;
         }
 
-        // --- Tab: accept autosuggestion if present ---
+        // --- Completion dropdown: route nav keys first ---
+        // If an open dropdown exists, ↑/↓/Enter/Tab/Esc belong to it.
+        if (this.opts.completionHandlesKey?.(ev)) {
+            // Consumed — but we don't return yet; the dropdown's commit
+            // handler will splice into us. Suppress further handling.
+            return;
+        }
+
+        // --- Tab: accept autosuggestion, else try filesystem completion ---
         if (ev.key === "Tab") {
             ev.preventDefault();
-            if (!this.acceptGhost()) {
-                // No ghost to accept — reserved for tab completion in a
-                // future phase. Swallow so focus doesn't escape the editor.
-            }
+            if (this.acceptGhost()) return;
+            this.runCompletion();
             return;
         }
 
@@ -202,6 +245,10 @@ export class InputEditor {
         // (don't wait for the debounce) so a stale suggestion can't flash.
         this.removeGhost();
         this.scheduleSuggest();
+        // Editor content changed — an open completion dropdown likely no
+        // longer reflects what the user is doing. Close it; they can hit
+        // Tab again to re-query the FS.
+        this.opts.closeCompletions?.();
     };
 
     /**
@@ -338,6 +385,149 @@ export class InputEditor {
         return true;
     }
 
+    // --- Tab completion ---------------------------------------------------
+
+    /**
+     * Compute the caret's byte offset inside the editor's plaintext. We
+     * walk a Range from the editor root to the caret and count bytes in
+     * each text node. Needed because Rust's `fs_complete` uses byte
+     * positions — JS string .length is UTF-16 code units, not bytes, and
+     * the naive assumption works fine for ASCII but breaks on multibyte
+     * chars in filenames (hello world paths exist).
+     */
+    private caretByteOffset(): number {
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return this.byteLength(this.getValue());
+        const range = sel.getRangeAt(0);
+        // Build a range covering the editor from start to caret.
+        const pre = document.createRange();
+        pre.selectNodeContents(this.el);
+        pre.setEnd(range.endContainer, range.endOffset);
+        // Extract that text and strip ghost span contents — they're not
+        // part of the "real" editor value that Rust sees.
+        const frag = pre.cloneContents();
+        const wrap = document.createElement("div");
+        wrap.appendChild(frag);
+        wrap.querySelectorAll(`.${GHOST_CLASS}`).forEach((n) => n.remove());
+        const text = (wrap as HTMLDivElement).innerText.replace(/\u00a0/g, " ");
+        return this.byteLength(text);
+    }
+
+    private byteLength(s: string): number {
+        // TextEncoder is the cheap, correct way to measure UTF-8 bytes.
+        return new TextEncoder().encode(s).length;
+    }
+
+    private async runCompletion(): Promise<void> {
+        if (!this.opts.completeFor) return;
+        const text = this.getValue();
+        const cursorByte = this.caretByteOffset();
+        let result: Awaited<ReturnType<typeof this.opts.completeFor>>;
+        try {
+            result = await this.opts.completeFor(text, cursorByte);
+        } catch (err) {
+            console.error("fs_complete failed", err);
+            return;
+        }
+        if (!result || result.completions.length === 0) return;
+
+        // Single match: splice inline, no dropdown flicker.
+        if (result.completions.length === 1) {
+            this.applyCompletion(
+                result.tokenStart,
+                result.tokenEnd,
+                result.completions[0].replacement,
+            );
+            return;
+        }
+
+        // Common-prefix optimization: if every match shares a longer prefix
+        // than what the user typed, fill that in silently. Matches zsh's
+        // "partial-word expansion" behavior — feels natural.
+        const common = commonPrefix(result.completions.map((c) => c.replacement));
+        const typed = text.slice(
+            byteToCharIndex(text, result.tokenStart),
+            byteToCharIndex(text, result.tokenEnd),
+        );
+        const typedBase = lastPathSegment(typed);
+        if (common.length > typedBase.length) {
+            // Splice only the "token dir + common prefix", then open the
+            // dropdown so the user can pick the final entry.
+            const token = text.slice(
+                byteToCharIndex(text, result.tokenStart),
+                byteToCharIndex(text, result.tokenEnd),
+            );
+            const dirEnd = token.lastIndexOf("/");
+            const dirPart = dirEnd >= 0 ? token.slice(0, dirEnd + 1) : "";
+            const expanded = dirPart + common;
+            this.applyCompletion(
+                result.tokenStart,
+                result.tokenEnd,
+                expanded,
+                /* keepDropdownOpen */ true,
+            );
+        }
+        this.opts.showCompletions?.(
+            result.completions,
+            (replacement) => {
+                // At pick time, the editor text may have changed (the user
+                // typed more chars before committing). Re-derive offsets
+                // from the caret so the splice still lands correctly.
+                const curText = this.getValue();
+                const curCursor = this.caretByteOffset();
+                const [tokStart] = findTokenAt(curText, curCursor);
+                this.applyCompletion(tokStart, curCursor, replacement);
+            },
+        );
+    }
+
+    /**
+     * Splice `replacement` into the editor text between the byte offsets
+     * [startByte, endByte). Sets contentEditable via textContent (all the
+     * editor's text is a single flat node for most of its life) and moves
+     * the caret to the end of the splice.
+     */
+    private applyCompletion(
+        startByte: number,
+        endByte: number,
+        replacement: string,
+        keepDropdownOpen = false,
+    ): void {
+        if (!keepDropdownOpen) {
+            this.opts.closeCompletions?.();
+        }
+        const text = this.getValue();
+        const startChar = byteToCharIndex(text, startByte);
+        const endChar = byteToCharIndex(text, endByte);
+        const next =
+            text.slice(0, startChar) + replacement + text.slice(endChar);
+        // textContent avoids any inline HTML we accidentally have; ghost
+        // span is already stripped via getValue/removeGhost.
+        this.removeGhost();
+        this.el.textContent = next;
+        // Place caret immediately after the inserted replacement.
+        const caretChar = startChar + replacement.length;
+        this.setCaretByCharOffset(caretChar);
+    }
+
+    /** Move the caret to a character offset from the start of the editor. */
+    private setCaretByCharOffset(offset: number): void {
+        const node = this.el.firstChild;
+        const range = document.createRange();
+        if (node && node.nodeType === Node.TEXT_NODE) {
+            const len = (node.nodeValue ?? "").length;
+            range.setStart(node, Math.min(offset, len));
+        } else {
+            // No text node yet — collapse to start.
+            range.selectNodeContents(this.el);
+            range.collapse(false);
+        }
+        range.collapse(true);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+    }
+
     private moveCursorToEnd(): void {
         const range = document.createRange();
         range.selectNodeContents(this.el);
@@ -348,4 +538,79 @@ export class InputEditor {
             sel.addRange(range);
         }
     }
+}
+
+/**
+ * Byte offset -> char (code unit) index for splicing JS strings after
+ * we receive byte-based offsets from Rust. Uses TextEncoder to count.
+ * Cost is O(n) but inputs are editor-line sized, not large files.
+ */
+function byteToCharIndex(text: string, byteOffset: number): number {
+    if (byteOffset <= 0) return 0;
+    const enc = new TextEncoder();
+    // Binary search would be O(log n) but adds complexity we don't need
+    // for a 200-char input string. Linear walk is fine.
+    let bytes = 0;
+    for (let i = 0; i < text.length; i++) {
+        // encode a single character (may be a surrogate pair -> 4 bytes);
+        // reading .length on encoded result of a substring is the simplest
+        // correct way.
+        bytes += enc.encode(text[i]).length;
+        if (bytes > byteOffset) return i;
+        if (bytes === byteOffset) return i + 1;
+    }
+    return text.length;
+}
+
+/** Longest common string prefix across a list. Returns "" if list is empty. */
+function commonPrefix(items: string[]): string {
+    if (items.length === 0) return "";
+    let prefix = items[0];
+    for (let i = 1; i < items.length && prefix.length > 0; i++) {
+        const s = items[i];
+        let j = 0;
+        const max = Math.min(prefix.length, s.length);
+        while (j < max && prefix[j] === s[j]) j++;
+        prefix = prefix.slice(0, j);
+    }
+    return prefix;
+}
+
+/** Last segment of a slash-separated path token. */
+function lastPathSegment(s: string): string {
+    const i = s.lastIndexOf("/");
+    return i < 0 ? s : s.slice(i + 1);
+}
+
+/**
+ * Walk backwards from byteOffset to find the start of the whitespace-
+ * delimited token ending there. Mirrors the Rust side's tokenizer.
+ */
+function findTokenAt(text: string, byteOffset: number): [number, number] {
+    const enc = new TextEncoder();
+    const end = Math.min(byteOffset, enc.encode(text).length);
+    // Walk char-by-char, accumulate bytes until we reach `end`, then
+    // continue backwards to find the last whitespace.
+    let bytes = 0;
+    let startChar = 0;
+    let endChar = text.length;
+    for (let i = 0; i < text.length; i++) {
+        const cb = enc.encode(text[i]).length;
+        if (bytes + cb > end) {
+            endChar = i;
+            break;
+        }
+        bytes += cb;
+        if (text[i] === " " || text[i] === "\t" || text[i] === "\n") {
+            // Start of next token sits after this whitespace.
+            startChar = i + 1;
+        }
+        if (bytes === end) {
+            endChar = i + 1;
+            break;
+        }
+    }
+    // Convert startChar back to bytes for caller convenience.
+    const startBytes = enc.encode(text.slice(0, startChar)).length;
+    return [startBytes, end];
 }

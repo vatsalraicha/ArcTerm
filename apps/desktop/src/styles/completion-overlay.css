@@ -1,0 +1,81 @@
+/*
+ * Tab-completion dropdown.
+ *
+ * Positioned absolutely above the input editor, anchored to the bottom of
+ * the input dock. Unlike the history overlay (modal, scrim), the completion
+ * dropdown is non-blocking: the user can keep typing while it's open, and
+ * it narrows its visible list in response to their typing.
+ */
+
+#input-dock { position: relative; }
+
+.arcterm-completion-overlay {
+  position: absolute;
+  left: 12px;
+  bottom: 100%; /* anchor above the input dock */
+  margin-bottom: 4px;
+  max-width: calc(100% - 24px);
+  min-width: 280px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 50;
+  animation: arcterm-completion-in 100ms ease-out;
+}
+
+.arcterm-completion-overlay.hidden {
+  display: none;
+}
+
+@keyframes arcterm-completion-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.arcterm-completion-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.arcterm-completion-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.arcterm-completion-item.selected {
+  background: rgba(79, 195, 247, 0.15);
+}
+
+.arcterm-completion-item.hidden-entry {
+  opacity: 0.65;
+}
+
+.arcterm-completion-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.arcterm-completion-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arcterm-completion-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
