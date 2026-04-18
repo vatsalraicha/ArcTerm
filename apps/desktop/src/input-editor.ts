@@ -269,16 +269,49 @@ export class InputEditor {
      * Intercept paste to insert plain text only. Without this, pasting from
      * a browser or rich-text app drops HTML nodes into the editor, which
      * both looks wrong and breaks `getValue()` round-trips.
+     *
+     * Why we don't use `document.execCommand("insertText", …)` here:
+     * WebKit's insertText silently STRIPS newline characters from the
+     * argument when the caret is in a flat contenteditable <div>. Symptom:
+     * pasting three separate commands (each on its own line) collapsed
+     * into one concatenated blob with no separator, which then submitted
+     * as a single malformed command — e.g. `curl … | head -1curl … |
+     * head -1curl …` producing `head: illegal line count -- 1curl`.
+     *
+     * Fix: insert a plain text node with literal `\n` characters via the
+     * Range API. The editor's CSS (`white-space: pre-wrap`) renders those
+     * newlines as visual line breaks, and innerText round-trips them back
+     * as `\n` so getValue() returns the original multi-line string — which
+     * the shell then executes line-by-line when we write it to the PTY.
      */
     private readonly onPaste = (ev: ClipboardEvent): void => {
         ev.preventDefault();
         const text = ev.clipboardData?.getData("text/plain") ?? "";
         if (!text) return;
-        // execCommand is deprecated but it's still the only reliable way to
-        // insert text at the caret while preserving undo history in
-        // contenteditable. We'll swap to the Input Events API later if WebKit
-        // ever removes it.
-        document.execCommand("insertText", false, text);
+        // Normalize Windows/Mac-classic line endings to \n so we don't end
+        // up with stray \r bytes in the submitted command (which the PTY
+        // would forward verbatim and confuse zle's line parser).
+        const normalized = text.replace(/\r\n?/g, "\n");
+        this.removeGhost();
+        const sel = window.getSelection();
+        const node = document.createTextNode(normalized);
+        if (sel && sel.rangeCount > 0 && this.el.contains(sel.anchorNode)) {
+            const range = sel.getRangeAt(0);
+            range.deleteContents();
+            range.insertNode(node);
+            range.setStartAfter(node);
+            range.setEndAfter(node);
+            sel.removeAllRanges();
+            sel.addRange(range);
+        } else {
+            // No caret inside the editor — append and park the caret at end.
+            this.el.appendChild(node);
+            this.moveCursorToEnd();
+        }
+        // Paste counts as an "input" for our purposes: refresh ghost and
+        // dismiss any stale completion dropdown, mirroring onInput.
+        this.scheduleSuggest();
+        this.opts.closeCompletions?.();
     };
 
     // --- Suggestion plumbing ---------------------------------------------
