@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "ArcTerm — open-source AI-powered terminal (workspace root)",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "scripts": {
     "dev:desktop": "pnpm --filter @arcterm/desktop dev",
     "build:desktop": "pnpm --filter @arcterm/desktop build"

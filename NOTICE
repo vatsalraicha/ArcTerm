@@ -1,0 +1,39 @@
+ArcTerm
+Copyright (c) 2026 Vatsal Raicha
+https://github.com/vatsalraicha/ArcTerm
+
+This product is licensed under the Apache License, Version 2.0 (the
+"License"); you may not use this project except in compliance with the
+License. A copy of the License is distributed with this project in the
+LICENSE file, and is also available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+If you redistribute, fork, or build on this codebase, please retain this
+attribution and link back to the upstream repository. This request is in
+addition to the attribution notices required by the Apache License.
+
+The "ArcTerm" name, wordmark, and application icons are separately
+licensed under the Creative Commons Attribution 4.0 International License
+(CC BY 4.0). See LICENSE-BRAND.md for details.
+
+----------------------------------------------------------------------
+Third-party components
+----------------------------------------------------------------------
+
+This project includes or depends on the following third-party works.
+Their own licenses apply to those portions:
+
+  * Fig autocomplete specs (withfig/autocomplete) — MIT License.
+    Compiled into apps/desktop/src-tauri/completion-specs/bundle.json
+    via scripts/import-fig-specs.mjs.
+    https://github.com/withfig/autocomplete
+
+  * Gemma model weights — Google DeepMind, Apache License 2.0 /
+    Gemma Terms of Use. Weights are not distributed with ArcTerm;
+    they are downloaded on demand from bartowski's Hugging Face
+    quantizations.
+    https://huggingface.co/bartowski
+
+  * All Rust and npm dependencies listed in Cargo.lock and
+    pnpm-lock.yaml retain their own upstream licenses.

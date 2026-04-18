@@ -9,7 +9,7 @@ output, rich tab completion, a proper input editor — and makes them
 open source, offline-capable, and yours. No login wall, no telemetry,
 no subscription required (unless you want the Claude one).
 
-**License:** MIT.
+**License:** Apache-2.0 (code) · CC BY 4.0 (name + icons).
 **Platform:** macOS 11+ (Apple Silicon + Intel).
 **Status:** v0.1.0 alpha — feature-complete but rough edges remain.
 
@@ -153,6 +153,12 @@ Other runtime files under `~/.arcterm/`:
 
 ## Credits
 
+ArcTerm is created and maintained by **[Vatsal Raicha](https://github.com/vatsalraicha)**.
+If you fork this project, vendor parts of it, or build a derivative product on
+top of it, please keep the attribution in [`LICENSE`](./LICENSE) and
+[`NOTICE`](./NOTICE) and link back to the upstream repository — it's both a
+license requirement and how the project grows.
+
 - **Tab-completion specs** are imported from
   [`withfig/autocomplete`](https://github.com/withfig/autocomplete) (MIT).
   617 of their ~735 command specs ship compiled-in; the remainder use
@@ -179,4 +185,18 @@ Before opening one:
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+ArcTerm is dual-licensed to draw a clean line between the code and the brand:
+
+- **Source code** — [Apache License 2.0](./LICENSE). You can use, modify,
+  redistribute, and ship commercial derivatives as long as you keep the
+  copyright notice, the [`NOTICE`](./NOTICE) file, and note any changes you
+  made. Apache 2.0 also grants you a patent license from contributors.
+- **Name + icons** ("ArcTerm" wordmark, app icons under
+  `apps/desktop/src-tauri/icons/`) — [Creative Commons Attribution 4.0
+  International (CC BY 4.0)](./LICENSE-BRAND.md). Reuse freely with credit
+  to Vatsal Raicha + a link back to this repo.
+
+If you're shipping a distinctly different product built on ArcTerm, please
+rename it and use your own icons — that keeps things clear for users.
+
+Copyright © 2026 Vatsal Raicha.
