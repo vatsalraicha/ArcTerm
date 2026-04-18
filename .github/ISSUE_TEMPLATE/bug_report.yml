@@ -1,0 +1,107 @@
+name: Bug report
+description: Something in ArcTerm is broken or behaves unexpectedly.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more specific the
+        reproduction, the faster it gets fixed. If this is a security
+        issue, please **don't** file it here — open a private security
+        advisory instead:
+        <https://github.com/vatsalraicha/ArcTerm/security/advisories/new>.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues and this hasn't been reported yet.
+          required: true
+        - label: I'm on the latest ArcTerm release (or `main`) — if not, I've tested against it and the bug still reproduces.
+          required: true
+
+  - type: input
+    id: arcterm-version
+    attributes:
+      label: ArcTerm version
+      description: See "About ArcTerm" in the app menu, or the release tag you downloaded.
+      placeholder: "v0.1.0-alpha.phase7"
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "14.5 (Sonoma)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options:
+        - Apple Silicon (M-series)
+        - Intel
+    validations:
+      required: true
+
+  - type: input
+    id: shell
+    attributes:
+      label: Shell
+      description: Output of `echo $SHELL`. Bug is more likely to reproduce in the same shell as yours.
+      placeholder: "/bin/zsh"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, numbered steps. If the bug requires a specific command or file, paste it.
+      placeholder: |
+        1. Open ArcTerm
+        2. Paste the following three lines into the input editor:
+           ...
+        3. Press Enter
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the exact error text if any. Screenshots and GIFs help a lot for UI bugs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-terminal
+    attributes:
+      label: Does it reproduce in another terminal?
+      description: |
+        30-second check that saves a lot of triage. Try the same steps in
+        Terminal.app or iTerm2. "Yes, also broken there" usually points
+        at a shell/config issue upstream of ArcTerm.
+      placeholder: "Tried in Terminal.app, works fine there — ArcTerm-specific."
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / console output
+      description: |
+        If the DevTools console has anything relevant, paste it. Open with
+        `⌥⌘I` in a dev build. Logs will be rendered as a code block
+        automatically.
+      render: text

@@ -1,0 +1,17 @@
+# Disable "Open a blank issue" — every issue should go through one of
+# the structured templates so we always get version + repro info upfront.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Questions & usage help
+    url: https://github.com/vatsalraicha/ArcTerm/discussions
+    about: |
+      Ask how to configure ArcTerm, get help with a workflow, or discuss
+      ideas that aren't yet a concrete feature request. Keeps the issue
+      tracker focused on tracked work.
+
+  - name: Security vulnerability
+    url: https://github.com/vatsalraicha/ArcTerm/security/advisories/new
+    about: |
+      Please report security issues privately via a GitHub security
+      advisory — not as a public issue.
