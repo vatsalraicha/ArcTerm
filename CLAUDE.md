@@ -22,15 +22,24 @@ cd apps/desktop/src-tauri && cargo check    # Rust
 cd apps/desktop && pnpm vite:build          # Frontend
 ```
 
-Latest commit (at the time of writing this doc): **`b67c87c`** — model swap
-via settings panel + `/arcterm-load` slash command.
+Latest commit (at the time of writing this doc): **`14b25fb`** —
+`docs: add SECURITY.md with private disclosure policy`. Community
+paperwork is now complete (Apache-2.0 relicensing + CoC + CONTRIBUTING
++ SECURITY + structured issue templates); the last code change was
+`b244c78` fixing multi-line paste in the input editor.
 
 ---
 
 ## What ArcTerm is
 
 Modern terminal emulator inspired by Warp, with Claude CLI + local Gemma
-as AI backends. **Open source, MIT.** Two deliverables per the spec:
+as AI backends. **Open source, dual-licensed:** source code under Apache
+2.0 (`LICENSE`), brand assets (the "ArcTerm" name + app icons) under
+CC BY 4.0 (`LICENSE-BRAND.md`). Originally MIT through the phase-7
+alpha; switched on 2026-04-18 for Apache's explicit patent grant,
+change-notice clause, and NOTICE-file propagation — stronger
+attribution than MIT while staying permissive. Two deliverables per
+the spec:
 
 1. **Desktop app** (shipped, what you work on daily) — Tauri v2 shell
    hosting xterm.js, custom input editor, sidebar with multi-session
@@ -72,9 +81,22 @@ Python sidecar; dropped in favor of Rust subprocess calls).
 ```
 ArcTerm/
 ├── CLAUDE.md                       ← this file
-├── .github/workflows/
-│   ├── ci.yml                      check on push + PR (cargo check/clippy/test + vite)
-│   └── release.yml                 on v* tag: build .app + .dmg, attach to draft release
+├── README.md                       public-facing intro, build + install instructions
+├── INSTALL.md                      end-user install guide for the .dmg
+├── LICENSE                         Apache 2.0 (verbatim from apache.org)
+├── LICENSE-BRAND.md                CC BY 4.0 covering "ArcTerm" name + icons
+├── NOTICE                          Apache §4(d) attribution; third-party components
+├── CODE_OF_CONDUCT.md              Contributor Covenant 2.1
+├── CONTRIBUTING.md                 scope, build, PR + commit conventions
+├── SECURITY.md                     private disclosure policy (GitHub advisories)
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml                  check on push + PR (cargo check/clippy/test + vite)
+│   │   └── release.yml             on v* tag: build .app + .dmg, attach to draft release
+│   └── ISSUE_TEMPLATE/
+│       ├── bug_report.yml          structured YAML form: version, macOS, chip, repro
+│       ├── feature_request.yml     problem-first form; flags "willing to PR"
+│       └── config.yml              disables blank issues; routes Q&A → Discussions
 ├── apps/
 │   └── desktop/
 │       ├── package.json
@@ -396,6 +418,21 @@ frontend writes the command manually via `writeRaw` after the pill
    recognize. Re-run `scripts/import-fig-specs.mjs` after cloning
    `.fig-autocomplete-source/` to refresh.
 
+7. **Don't use `execCommand("insertText")` in the input editor's paste
+   handler.** WebKit's `insertText` silently **strips newline
+   characters** from the argument when the caret is in a flat
+   contenteditable `<div>`. Symptom that motivated the fix (`b244c78`):
+   pasting three separate commands collapsed them into one
+   concatenated blob with no separator, which then submitted as a
+   single malformed command (`head -1curl …` → "head: illegal line
+   count"). The current `onPaste` normalizes `\r\n?` → `\n` and
+   inserts a plain text node with literal `\n` characters via the
+   Range API; CSS `white-space: pre-wrap` renders them as line breaks
+   and `innerText` round-trips them so `getValue()` returns the true
+   multi-line string. **Do not** revert to execCommand for paste;
+   if you need clipboard-driven edits elsewhere, use the same
+   Range-insertion pattern.
+
 ---
 
 ## Phase 7 status & what's left
@@ -405,7 +442,10 @@ Light theme · `.part` cleanup · SIGABRT drop-order · bash/fish hooks ·
 welcome banner · full Fig import · `?` prefix · download resume ·
 settings panel + ⌘, · completion bug fixes · block render rewrite ·
 right-click context menu · app icon · native macOS menu · CI + release
-workflows · model swap (settings + `/arcterm-load`).
+workflows · model swap (settings + `/arcterm-load`) · multi-line paste
+fix (`b244c78`) · Apache-2.0 + CC BY 4.0 relicensing + NOTICE
+(`396dceb`) · CoC + CONTRIBUTING + structured issue templates
+(`2613022`) · SECURITY policy (`14b25fb`).
 
 ### Remaining
 - 🔲 **Global search** (`⌘⇧F`). Search across command history + session
@@ -428,7 +468,23 @@ subprocess approach.
 - **Running dev binary has no icon.** `pnpm tauri dev` runs
   `target/debug/arcterm-desktop` directly (no .app bundle) so macOS
   shows a generic icon. Use `pnpm tauri build --debug` to produce a
-  proper `.app` that shows the icon.
+  proper `.app` that shows the icon. `--debug` also sidesteps the
+  deployment-target issue below for quick local iteration.
+- **`pnpm tauri build` (release) needs MACOSX_DEPLOYMENT_TARGET set
+  locally** on modern Xcode SDKs (15+). llama-cpp-sys-2 pulls in
+  `std::filesystem::path` which MacOSX*.sdk marks as introduced in
+  10.15; without an explicit target, compilation fails with "`~path`
+  is unavailable". CI handles this via workflow-level env; locally
+  you need to set it yourself:
+  `MACOSX_DEPLOYMENT_TARGET=11.0 CMAKE_OSX_DEPLOYMENT_TARGET=11.0
+  pnpm tauri build`. Empirically, `pnpm tauri build --debug` on the
+  same machine hasn't hit this — mechanism unclear, but if you just
+  need a working `.app` locally, `--debug` is the friction-free path.
+  Installing the built
+  `.app` into `/Applications` is just
+  `rm -rf /Applications/ArcTerm.app && cp -R
+  apps/desktop/src-tauri/target/debug/bundle/macos/ArcTerm.app
+  /Applications/`.
 - **macOS icon cache is sticky.** After a new icon, `killall Dock`
   usually works; stubborn cache needs
   `sudo rm -rf /Library/Caches/com.apple.iconservices.store`.
