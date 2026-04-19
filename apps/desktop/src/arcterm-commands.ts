@@ -236,8 +236,14 @@ async function cmdDownload(session: Session, args: string[]): Promise<void> {
     let unlistenDone: UnlistenFn | null = null;
     let firstProgress = true;
 
-    const donePromise = new Promise<DonePayload>(async (resolve) => {
-        unlistenProgress = await listen<ProgressPayload>(
+    // SECURITY FIX: the original `new Promise(async (...) => {...})` would
+    // swallow synchronous exceptions thrown while subscribing. Hoist the
+    // subscription into a real async IIFE so errors propagate to the outer
+    // try/catch below.
+    const donePromise = new Promise<DonePayload>((resolve, reject) => {
+        void (async () => {
+            try {
+                unlistenProgress = await listen<ProgressPayload>(
             "model://progress",
             (ev) => {
                 if (ev.payload.id !== id) return;
@@ -272,6 +278,10 @@ async function cmdDownload(session: Session, args: string[]): Promise<void> {
             unlistenDone?.();
             resolve(ev.payload);
         });
+            } catch (err) {
+                reject(err);
+            }
+        })();
     });
 
     try {

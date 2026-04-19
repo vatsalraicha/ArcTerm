@@ -190,22 +190,25 @@ export class HistoryOverlay {
 
             const meta = document.createElement("span");
             meta.className = "arcterm-history-meta";
-            const marks = [];
+            // SECURITY FIX: avoid innerHTML entirely. Previous version
+            // interpolated exit_code + escaped cwd into HTML strings; a
+            // future schema change making exit_code a string would lose
+            // all sanitization. Use DOM nodes with textContent so there
+            // is no string-to-HTML boundary to guard.
             if (entry.exit_code === 0) {
-                marks.push(
-                    `<span class="arcterm-history-ok">✓</span>`,
-                );
+                meta.append(badge("arcterm-history-ok", "✓"));
+                meta.append(document.createTextNode("  "));
             } else if (entry.exit_code && entry.exit_code !== 0) {
-                marks.push(
-                    `<span class="arcterm-history-err">✗ ${entry.exit_code}</span>`,
+                meta.append(
+                    badge("arcterm-history-err", `✗ ${entry.exit_code}`),
                 );
+                meta.append(document.createTextNode("  "));
             }
             if (entry.cwd) {
-                marks.push(
-                    `<span class="arcterm-history-cwd">${escapeHtml(shortenCwd(entry.cwd))}</span>`,
+                meta.append(
+                    badge("arcterm-history-cwd", shortenCwd(entry.cwd)),
                 );
             }
-            meta.innerHTML = marks.join("  ");
 
             li.append(cmd, meta);
             this.list.append(li);
@@ -293,10 +296,9 @@ function shortenCwd(cwd: string): string {
     return cwd.replace(new RegExp(`^${home}[^/]+`), "~");
 }
 
-function escapeHtml(s: string): string {
-    return s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+function badge(className: string, text: string): HTMLSpanElement {
+    const el = document.createElement("span");
+    el.className = className;
+    el.textContent = text;
+    return el;
 }

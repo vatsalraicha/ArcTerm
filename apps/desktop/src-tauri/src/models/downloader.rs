@@ -112,6 +112,16 @@ async fn download_inner(
     app: AppHandle,
     spec: ModelSpec,
 ) -> Result<String, String> {
+    // SECURITY FIX: refuse non-HTTPS model URLs. Registry is compile-time-static
+    // today, but a future remote-registry feature must not let `http://` or
+    // `file://` slip through and stream bytes into the inference engine.
+    if !spec.url.starts_with("https://") {
+        return Err(format!(
+            "refusing to download {}: URL scheme must be https",
+            spec.url
+        ));
+    }
+
     let local_path = spec
         .local_path()
         .ok_or_else(|| "HOME not set".to_string())?;
@@ -121,6 +131,13 @@ async fn download_inner(
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    // SECURITY FIX: GGUFs we load into the inference engine must not be
+    // writable by other local users. Restrict dir to owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await;
+    }
 
     // .part sibling. Written during transfer, renamed on success.
     let part_path = local_path.with_extension(format!(
@@ -232,9 +249,20 @@ async fn download_inner(
     // don't want to flood the IPC bus with hundreds of events per second.
     let mut last_emit: u64 = 0;
     const EMIT_EVERY: u64 = 512 * 1024; // every 512 KB
+    // SECURITY FIX: hard ceiling on downloaded bytes regardless of what
+    // Content-Length claimed. A lying CDN/MITM can't fill the disk by
+    // serving more bytes than advertised. 32 GB is larger than any model
+    // we'd realistically ship but bounded enough to matter.
+    const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| format!("download stream: {e}"))?;
+        if downloaded + bytes.len() as u64 > MAX_TOTAL_BYTES {
+            return Err(format!(
+                "download exceeded max size {} bytes — aborting",
+                MAX_TOTAL_BYTES
+            ));
+        }
         hasher.update(&bytes);
         file.write_all(&bytes)
             .await

@@ -199,7 +199,13 @@ export async function setupTerminal(
     const key = payload.slice(0, eq);
     const value = payload.slice(eq + 1);
     if (key === "ArcTermBranch") {
-      for (const cb of branchListeners) cb(value);
+      // SECURITY FIX: any program can emit OSC 1337 to spoof a branch.
+      // Strip control chars and cap length so a malicious value can't
+      // inject escapes or bloat the prompt bar. Git ref-name grammar
+      // tops out well under 256 chars in practice.
+      // eslint-disable-next-line no-control-regex
+      const clean = value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 256);
+      for (const cb of branchListeners) cb(clean);
       return true;
     }
     // Unknown ArcTerm* keys: consume silently so they don't render as garbage.
@@ -490,13 +496,21 @@ function parseOsc7(uri: string): string | null {
   const pathStart = rest.indexOf("/");
   if (pathStart === -1) return null;
   const encodedPath = rest.slice(pathStart);
+  let decoded: string;
   try {
-    return decodeURIComponent(encodedPath);
+    decoded = decodeURIComponent(encodedPath);
   } catch {
-    // Malformed percent-encoding — return the raw value rather than nothing
-    // so the UI can still show *something* sensible.
-    return encodedPath;
+    decoded = encodedPath;
   }
+  // SECURITY FIX: validate the decoded cwd before trusting it. A malicious
+  // program the user runs could emit OSC 7 with a crafted value that later
+  // flows into the history DB, AI prompt context, and filesystem completion.
+  // Require absolute path, no NUL bytes, no ANSI escapes, reasonable length.
+  if (!decoded.startsWith("/")) return null;
+  if (decoded.length > 4096) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(decoded)) return null;
+  return decoded;
 }
 
 /**

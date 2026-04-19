@@ -66,14 +66,15 @@ pub fn run() {
     // Settings: read ~/.arcterm/config.json. Load failures fall back to
     // defaults rather than aborting boot — a broken config shouldn't mean
     // a broken terminal.
+    // SECURITY FIX: don't panic the whole app because settings couldn't open.
+    // Previously a corrupt / unreadable config.json would crash boot. Fall
+    // back to an ephemeral default store so the terminal still works (user
+    // just sees default theme/mode).
     let settings = match SettingsStore::open() {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            log::warn!("settings load failed ({e}), using in-memory defaults");
-            // Fall back to a store that still persists to disk on change
-            // but starts from defaults. open() only fails on HOME lookup
-            // failure, which is fatal for many other things too.
-            panic!("fatal: cannot set up settings store: {e}");
+            log::error!("settings load failed ({e}); using ephemeral defaults");
+            Arc::new(SettingsStore::ephemeral())
         }
     };
 
@@ -121,7 +122,13 @@ pub fn run() {
         };
 
     // Claude backend: always registered. is_available() gates its use.
-    let claude_backend: Arc<dyn AiBackend> = Arc::new(ClaudeCliBackend::default());
+    // SECURITY FIX: honor settings.ai.claudePath on boot. Previously the
+    // field was persisted but ignored — users believed they had pinned a
+    // path but PATH lookup still won.
+    let claude_concrete = Arc::new(ClaudeCliBackend::with_binary(
+        &initial_settings.ai.claude_path,
+    ));
+    let claude_backend: Arc<dyn AiBackend> = claude_concrete.clone();
 
     let ai_router: Arc<AiRouter> = Arc::new(AiRouter::new(
         claude_backend,
@@ -212,7 +219,8 @@ pub fn run() {
         .manage(pty_manager)
         .manage(ai_router)
         .manage(settings)
-        .manage(download_lock);
+        .manage(download_lock)
+        .manage(claude_concrete);
 
     // Only register the HistoryStore state when the DB opened cleanly.
     // Absent state makes history_* commands fail with a clear error rather

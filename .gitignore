@@ -22,6 +22,7 @@ target/
 # Local project briefs — keep on disk, don't publish
 Dos_And_Donts.md
 Project_Prompt_Detailed.md
+Task_For_Session_*.md
 
 # Fig autocomplete source — cloned at build time by scripts/import-fig-specs.mjs,
 # not vendored. The extracted static JSON lives in apps/desktop/src-tauri/completion-specs/

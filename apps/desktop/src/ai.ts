@@ -104,33 +104,36 @@ export function aiStream(
     let unlisten: UnlistenFn | null = null;
     let settled = false;
 
-    const promise = new Promise<string>(async (resolve, reject) => {
-        let requestId: string;
-        try {
-            requestId = await invoke<string>("ai_stream", { req });
-        } catch (err) {
-            settled = true;
-            reject(err);
-            return;
-        }
-
-        unlisten = await listen<AiChunk>("ai://chunk", (ev) => {
-            if (ev.payload.id !== requestId) return;
-            if (ev.payload.delta) {
-                buffer += ev.payload.delta;
-                onDelta(ev.payload.delta);
-            }
-            if (ev.payload.done) {
-                if (unlisten) unlisten();
-                settled = true;
-                if (ev.payload.error) {
-                    reject(new Error(ev.payload.error));
-                } else {
-                    resolve(buffer);
+    // SECURITY FIX: the original `new Promise(async (...) => {...})`
+    // pattern swallows synchronous exceptions thrown inside the executor.
+    // Factor the async work into its own function and explicitly resolve /
+    // reject so every failure path surfaces to the caller.
+    const promise = (async (): Promise<string> => {
+        const requestId = await invoke<string>("ai_stream", { req });
+        return await new Promise<string>((resolve, reject) => {
+            listen<AiChunk>("ai://chunk", (ev) => {
+                if (ev.payload.id !== requestId) return;
+                if (ev.payload.delta) {
+                    buffer += ev.payload.delta;
+                    onDelta(ev.payload.delta);
                 }
-            }
+                if (ev.payload.done) {
+                    if (unlisten) unlisten();
+                    settled = true;
+                    if (ev.payload.error) {
+                        reject(new Error(ev.payload.error));
+                    } else {
+                        resolve(buffer);
+                    }
+                }
+            }).then((fn) => {
+                unlisten = fn;
+            }).catch((err) => {
+                settled = true;
+                reject(err);
+            });
         });
-    });
+    })();
 
     return {
         promise,

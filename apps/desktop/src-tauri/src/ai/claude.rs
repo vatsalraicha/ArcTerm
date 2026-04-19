@@ -35,19 +35,53 @@ use super::{AiBackend, AiMode, AiRequest, AiResponse};
 /// Timeouts. The CLI can take a while on long prompts; 60s is generous but
 /// not so long the UI looks hung forever if something's wrong.
 const ASK_TIMEOUT_SECS: u64 = 60;
+/// SECURITY FIX: stream path previously had no timeout. A stuck CLI subprocess
+/// could keep a tokio task + unbounded channel alive forever. Cap at 5 min:
+/// long enough for verbose stream-json responses, short enough to reclaim
+/// resources if the child wedges.
+const STREAM_TIMEOUT_SECS: u64 = 300;
 
 pub struct ClaudeCliBackend {
     /// Path to the `claude` binary. Defaults to "claude" (PATH lookup);
     /// config can override (e.g. for users who installed via a non-
     /// standard location). Phase 5b config plumbing sets this.
-    pub binary: String,
+    pub binary: parking_lot::RwLock<String>,
 }
 
 impl Default for ClaudeCliBackend {
     fn default() -> Self {
         Self {
-            binary: "claude".to_string(),
+            binary: parking_lot::RwLock::new("claude".to_string()),
         }
+    }
+}
+
+impl ClaudeCliBackend {
+    /// Construct with an explicit binary path. Empty string = PATH lookup.
+    pub fn with_binary(path: &str) -> Self {
+        Self {
+            binary: parking_lot::RwLock::new(resolve_binary(path)),
+        }
+    }
+
+    /// SECURITY FIX: live-update the binary path from the settings pipeline.
+    /// Previously the claudePath setting was persisted but never applied —
+    /// users believed they had pinned a path but PATH lookup still won.
+    pub fn set_binary(&self, path: &str) {
+        *self.binary.write() = resolve_binary(path);
+    }
+
+    fn binary_snapshot(&self) -> String {
+        self.binary.read().clone()
+    }
+}
+
+/// Treat empty string as "use PATH lookup"; non-empty is a literal path.
+fn resolve_binary(path: &str) -> String {
+    if path.trim().is_empty() {
+        "claude".to_string()
+    } else {
+        path.to_string()
     }
 }
 
@@ -64,7 +98,8 @@ impl AiBackend for ClaudeCliBackend {
     async fn is_available(&self) -> bool {
         // `claude --version` is cheap and doesn't hit the network or
         // auth layer. If the binary isn't on PATH, Command spawn fails.
-        match Command::new(&self.binary)
+        let binary = self.binary_snapshot();
+        match Command::new(&binary)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -78,7 +113,8 @@ impl AiBackend for ClaudeCliBackend {
 
     async fn ask(&self, req: AiRequest) -> Result<AiResponse, String> {
         let prompt = build_prompt(&req);
-        let mut cmd = base_command(&self.binary);
+        let binary = self.binary_snapshot();
+        let mut cmd = base_command(&binary);
         cmd.arg("-p").arg(&prompt);
         cmd.arg("--output-format").arg("json");
 
@@ -157,7 +193,7 @@ impl AiBackend for ClaudeCliBackend {
 
     fn stream(&self, req: AiRequest) -> BoxStream<'static, Result<String, String>> {
         let prompt = build_prompt(&req);
-        let binary = self.binary.clone();
+        let binary = self.binary_snapshot();
 
         // tokio channel → async stream. We spawn a task that runs the CLI
         // and pumps per-line deltas; the returned stream just consumes.
@@ -188,32 +224,42 @@ impl AiBackend for ClaudeCliBackend {
 
             let mut reader = BufReader::new(stdout).lines();
             let mut last_text = String::new();
-            while let Ok(Some(line)) = reader.next_line().await {
+            // SECURITY FIX: overall stream deadline. A stuck CLI can't keep
+            // this task + unbounded channel alive forever.
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(STREAM_TIMEOUT_SECS);
+            'outer: loop {
+                let next = tokio::time::timeout_at(deadline, reader.next_line()).await;
+                let line = match next {
+                    Ok(Ok(Some(line))) => line,
+                    Ok(Ok(None)) => break 'outer,
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Err(format!("Claude CLI read: {e}")));
+                        let _ = child.kill().await;
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(Err("Claude CLI stream timed out".into()));
+                        let _ = child.kill().await;
+                        return;
+                    }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
                 match serde_json::from_str::<StreamEvent>(trimmed) {
                     Ok(StreamEvent::Assistant { message }) => {
-                        // Text deltas: each event carries the CURRENT full
-                        // assistant message in some CLI versions. We compute
-                        // the diff against `last_text` so the UI sees true
-                        // deltas. If the content is actually incremental
-                        // (newer CLI behavior) the diff == the new content
-                        // and this still works.
                         let current = message.text();
                         let delta = if current.len() >= last_text.len()
                             && current.starts_with(&last_text)
                         {
                             current[last_text.len()..].to_string()
                         } else {
-                            // Non-append update (rare) — emit whole thing and
-                            // let the frontend replace.
                             current.clone()
                         };
                         last_text = current;
                         if !delta.is_empty() && tx.send(Ok(delta)).is_err() {
-                            // Receiver dropped; stop pumping.
                             let _ = child.kill().await;
                             return;
                         }
@@ -222,18 +268,10 @@ impl AiBackend for ClaudeCliBackend {
                         if is_error {
                             let _ = tx.send(Err(result));
                         }
-                        // Don't emit the final text — it duplicates whatever
-                        // we've already streamed via assistant events.
-                        break;
+                        break 'outer;
                     }
-                    Ok(StreamEvent::Other) => {
-                        // system/init/tool_use etc — ignore for chat use.
-                    }
-                    Err(_) => {
-                        // Non-JSON line (shouldn't happen with stream-json,
-                        // but guard against CLI oddities).
-                        continue;
-                    }
+                    Ok(StreamEvent::Other) => {}
+                    Err(_) => continue,
                 }
             }
             // Drain process to avoid zombies.
@@ -268,6 +306,24 @@ fn base_command(binary: &str) -> Command {
         "CLAUDE_CODE_OAUTH_TOKEN",
     ] {
         cmd.env_remove(var);
+    }
+    // SECURITY FIX: defense-in-depth against unknown-future Anthropic /
+    // Claude env vars leaking the wrong credentials into the subprocess.
+    // Iterate the parent env once and strip any var that looks auth-ish by
+    // prefix. Cheap (env is small), and doesn't require us to maintain an
+    // exhaustive allowlist.
+    for (name, _) in std::env::vars_os() {
+        let name_str = name.to_string_lossy();
+        let upper = name_str.to_uppercase();
+        if upper.starts_with("ANTHROPIC_")
+            || upper.starts_with("CLAUDE_")
+            || upper.contains("API_KEY")
+            || upper.contains("AUTH_TOKEN")
+            || upper.contains("OAUTH")
+            || upper.contains("SESSION_KEY")
+        {
+            cmd.env_remove(&name);
+        }
     }
     cmd.stdin(Stdio::null());
     cmd

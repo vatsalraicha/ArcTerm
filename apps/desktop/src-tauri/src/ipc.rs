@@ -33,12 +33,26 @@ pub fn pty_spawn(
     manager.spawn(app, cols, rows)
 }
 
+/// SECURITY FIX: hard cap on a single pty_write payload. A compromised or
+/// buggy renderer could otherwise shove arbitrarily large strings at the
+/// shell. 1 MiB is orders of magnitude larger than any legitimate keystroke
+/// burst or paste (the shell itself has READLINE_LINE limits well below
+/// this) but bounded enough to prevent trivial memory pressure attacks.
+const PTY_WRITE_MAX_BYTES: usize = 1 << 20;
+
 #[tauri::command]
 pub fn pty_write(
     manager: State<'_, PtyManager>,
     id: String,
     data: String,
 ) -> Result<(), String> {
+    if data.len() > PTY_WRITE_MAX_BYTES {
+        return Err(format!(
+            "pty_write payload too large ({} bytes; max {})",
+            data.len(),
+            PTY_WRITE_MAX_BYTES
+        ));
+    }
     manager.write(&id, &data)
 }
 
@@ -229,8 +243,12 @@ pub fn settings_get(store: State<'_, std::sync::Arc<SettingsStore>>) -> Settings
 #[tauri::command]
 pub fn settings_set(
     store: State<'_, std::sync::Arc<SettingsStore>>,
+    claude: State<'_, std::sync::Arc<crate::ai::claude::ClaudeCliBackend>>,
     settings: Settings,
 ) -> Result<(), String> {
+    // SECURITY FIX: apply the claudePath change to the live backend. Without
+    // this, persisting a new path had no effect until process restart.
+    claude.inner().set_binary(&settings.ai.claude_path);
     store.inner().set(settings)
 }
 

@@ -89,6 +89,14 @@ pub fn install() -> Result<Paths, String> {
         .map_err(|e| format!("create {}: {e}", integration_dir.display()))?;
     fs::create_dir_all(&zdotdir).map_err(|e| format!("create {}: {e}", zdotdir.display()))?;
 
+    // SECURITY FIX: restrict the arcterm state dir and its children to the
+    // current user (0700). Every PTY sources arcterm.zsh from disk; a
+    // group/world-writable path would let another local user inject code
+    // that runs in the user's shell on next session.
+    restrict_dir(&root);
+    restrict_dir(&integration_dir);
+    restrict_dir(&zdotdir);
+
     // zsh
     write_file(&integration_dir.join("arcterm.zsh"), ARCTERM_ZSH)?;
     write_file(&zdotdir.join(".zshenv"), ZDOTDIR_ZSHENV)?;
@@ -129,5 +137,29 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
     // Write atomically-ish: we don't bother with a temp-rename dance because
     // a partial write here would only affect the next shell spawn, and we
     // rewrite on every launch anyway.
-    fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))
+    fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+    // SECURITY FIX: shell scripts that run in every PTY must be owner-only.
+    restrict_file(path);
+    Ok(())
 }
+
+/// Best-effort chmod 0700. Only meaningful on Unix; elsewhere a no-op.
+/// We intentionally ignore the error: if chmod fails the worst case is a
+/// more-permissive dir than intended — the fs ops above already succeeded
+/// and refusing to boot over a permission-tightening step would be worse UX.
+#[cfg(unix)]
+fn restrict_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+#[cfg(not(unix))]
+fn restrict_dir(_path: &Path) {}
+
+/// Best-effort chmod 0600 for sensitive files (config.json, shell scripts).
+#[cfg(unix)]
+fn restrict_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) {}

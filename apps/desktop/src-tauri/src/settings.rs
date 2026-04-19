@@ -112,6 +112,13 @@ impl SettingsStore {
         let dir = home.join(".arcterm");
         fs::create_dir_all(&dir)
             .map_err(|e| format!("create {}: {e}", dir.display()))?;
+        // SECURITY FIX: mirror the 0700 mode enforced by shell_hooks in case
+        // settings init happens to land first.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
         let path = dir.join("config.json");
 
         let settings = match fs::read_to_string(&path) {
@@ -135,6 +142,16 @@ impl SettingsStore {
             inner: RwLock::new(settings),
             path,
         })
+    }
+
+    /// SECURITY FIX: fallback constructor for when HOME/config.json can't
+    /// be accessed. Returns a store whose `write_to_disk` will still attempt
+    /// (and silently fail if the path is unwritable) so we never panic boot.
+    pub fn ephemeral() -> Self {
+        Self {
+            inner: RwLock::new(Settings::default()),
+            path: PathBuf::from("/dev/null"),
+        }
     }
 
     pub fn get(&self) -> Settings {
@@ -186,5 +203,19 @@ fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
         f.write_all(data)?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path)
+    // SECURITY FIX: config.json may hold a custom claudePath that controls
+    // which binary AI requests invoke. Tighten to owner-only BEFORE rename
+    // so there's never a window where the final file is world-readable.
+    restrict_file(&tmp);
+    fs::rename(&tmp, path)?;
+    restrict_file(path);
+    Ok(())
 }
+
+#[cfg(unix)]
+fn restrict_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) {}

@@ -51,10 +51,22 @@ impl HistoryStore {
         let dir = home.join(".arcterm");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create {}: {e}", dir.display()))?;
+        // SECURITY FIX: history contains every command the user ever ran —
+        // treat as sensitive. 0700 on the dir, 0600 on the DB file(s).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         let path = dir.join("history.db");
 
         let conn = Connection::open(&path)
             .map_err(|e| format!("open {}: {e}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
 
         // WAL gives us concurrent readers alongside a writer — matters later
         // when the autosuggest query runs on the IPC thread while the editor
