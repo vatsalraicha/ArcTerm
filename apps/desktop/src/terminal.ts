@@ -129,7 +129,13 @@ export async function setupTerminal(
     cursorBlink: true,
     cursorStyle: "bar",
     scrollback: 10_000,
-    allowProposedApi: true,
+    // SECURITY FIX: allowProposedApi previously enabled experimental
+    // xterm surfaces — we used it defensively for `term.parser`, but in
+    // xterm 5.5.0 `parser` / `registerOscHandler` are no longer marked
+    // experimental in the type declarations. Dropping the flag trims
+    // attack surface at no functional cost. If a future upgrade flags
+    // `parser` experimental again we'll get a clear runtime error on
+    // boot and can re-add with a tight scope comment.
     theme: XTERM_THEMES[initialTheme],
   });
 
@@ -208,6 +214,69 @@ export async function setupTerminal(
     // OSC 133;C is currently not consumed by the frontend (we draw our
     // own block-start on editor-submit), but we still return true to
     // mark it handled so xterm doesn't render the raw bytes.
+    return true;
+  });
+
+  // --- OSC 52 handler: DROP all clipboard set/query attempts -----------
+  //
+  // SECURITY: OSC 52 lets the terminal writer set (or read, with c=p)
+  // the system clipboard. xterm.js supports this by default through its
+  // internal OSC parser. Any program writing to the PTY — including
+  // `cat somefile`, `ssh remote`, `docker logs`, or remote network
+  // output — could silently swap the user's clipboard contents. Classic
+  // attack: user has benign text copied, about to paste as a shell
+  // command; remote server emits `\e]52;c;cm0gLXJmIH4=\a` (base64 of
+  // `rm -rf ~`), clipboard silently becomes that, next paste executes.
+  //
+  // We don't use OSC 52 anywhere (our copy/paste flows go through the
+  // browser's native Clipboard API inside the renderer), so dropping
+  // wholesale costs us nothing and closes the attack.
+  //
+  // Returning `true` tells xterm the sequence was handled — no visible
+  // artifact, no clipboard mutation.
+  term.parser.registerOscHandler(52, () => true);
+
+  // --- OSC 8 handler: hyperlink with scheme allowlist ------------------
+  //
+  // SECURITY: xterm.js ships OSC 8 hyperlink support by default, making
+  // `\e]8;;<URL>\e\\<display text>\e]8;;\e\\` sequences from arbitrary
+  // PTY bytes render as clickable text. Display text and URL are
+  // independent — the classic link-spoofing primitive: text reads
+  // "GitHub issue #42", URL points to a phishing page, or worse a
+  // `javascript:` / `file:` / `data:` URI that the WebView might try
+  // to dereference.
+  //
+  // We register our own handler that:
+  //   1. Accepts only https:// (http:// ok for dev/local), rejects
+  //      javascript:, data:, file:, vbscript:, blob:, anything else.
+  //   2. Returns `true` to consume the sequence either way — we don't
+  //      want xterm's default handler to see it. Text still renders;
+  //      it just won't be clickable unless we accepted it.
+  //
+  // The accepted-case hookup (actually making it clickable via a safe
+  // click handler) is a Wave-3 follow-up. For Wave 2 we're closing the
+  // attack surface by consuming+dropping; no regression vs. a terminal
+  // that never supported OSC 8 in the first place. The WebLinksAddon
+  // still makes plain https:// URLs in regular text clickable, which
+  // is the path users actually rely on.
+  term.parser.registerOscHandler(8, (payload: string) => {
+    // Format: `<params>;<URL>` where params may be empty. Example:
+    // `id=x;https://example.com` or just `;https://example.com`.
+    const semi = payload.indexOf(";");
+    if (semi === -1) return true; // malformed → drop
+    const url = payload.slice(semi + 1);
+    if (url === "") {
+      // Empty URL = end of hyperlink span, always safe to pass.
+      return true;
+    }
+    const lower = url.toLowerCase();
+    if (!lower.startsWith("https://") && !lower.startsWith("http://")) {
+      // Scheme disallowed. Consume + drop so nothing downstream tries
+      // to honor a `javascript:` / `file:` / `data:` URL.
+      return true;
+    }
+    // Accepted scheme. Still consume to prevent xterm's default
+    // hyperlink behavior until Wave 3 wires a safe click handler.
     return true;
   });
 

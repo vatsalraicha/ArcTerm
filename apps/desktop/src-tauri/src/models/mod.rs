@@ -194,6 +194,163 @@ pub fn find(id: &str) -> Option<&'static ModelSpec> {
     REGISTRY.iter().find(|m| m.id == id)
 }
 
+/// SECURITY FIX: re-verify a GGUF's SHA256 before `LocalLlamaBackend::load`
+/// mmap's it.
+///
+/// The downloader hashes the bytes as they stream in and refuses the
+/// atomic rename unless the hash matches the registry pin, so the file
+/// is trustworthy *at the moment it's installed*. After that, it's
+/// trust-on-first-use forever: any same-uid process can overwrite the
+/// file in place, and the next `ai_set_local_model` / `ai_set_mode` /
+/// `/arcterm-load` would mmap-parse the attacker's crafted GGUF
+/// through llama-cpp-2. Known GGUF parser CVEs exist; we shouldn't
+/// trust on-disk bytes just because we once trusted them.
+///
+/// This function rehashes the full file (reads sequentially off disk,
+/// ~15–25 s for a 3 GB model on a modern SSD) and compares against
+/// the registry pin. On mismatch, returns a human-readable error and
+/// the caller refuses to load.
+///
+/// Skipped (with a logged warning) when the path doesn't map to a
+/// registry entry — we currently only load registry-shipped models,
+/// but the future plan to accept user-dropped GGUFs needs a separate
+/// trust path (sidecar signatures, explicit opt-in) rather than
+/// silently extending this check.
+pub fn verify_integrity(path: &std::path::Path) -> Result<(), String> {
+    verify_integrity_with_progress(path, |_, _| {})
+}
+
+/// Same as `verify_integrity` but invokes `progress(bytes_hashed, total_bytes)`
+/// as the hash advances. Used by the Wave 2.5 boot-path loader to stream
+/// a percentage up to the toolbar pill. Chunk size (1 MiB) means the
+/// callback fires ~8000 times for an 8 GB file — callers that care about
+/// event rate should throttle on their own (e.g. only emit on integer
+/// percent boundaries).
+pub fn verify_integrity_with_progress(
+    path: &std::path::Path,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::fs::File;
+    use std::io::Read;
+
+    let basename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("GGUF path has no filename: {}", path.display()))?;
+    let Some(spec) = REGISTRY.iter().find(|s| s.filename == basename) else {
+        log::warn!(
+            "GGUF at {} not in registry; skipping SHA verify. \
+             Only registry-shipped models are currently supported for \
+             integrity checks.",
+            path.display()
+        );
+        return Ok(());
+    };
+
+    // Total size for the progress denominator. Prefer the actual on-disk
+    // length over `spec.size_bytes` (advisory) so a tiny-off registry
+    // pin doesn't make the bar stop at 99% or overshoot to 101%.
+    let total_bytes = std::fs::metadata(path)
+        .map(|m| m.len())
+        .unwrap_or(spec.size_bytes);
+
+    let f = File::open(path)
+        .map_err(|e| format!("open {} for verify: {e}", path.display()))?;
+    // Ask the kernel to prefetch the whole file sequentially. On macOS
+    // this is F_RDADVISE (Darwin-specific; off-cheap, fire-and-forget).
+    // Measurable win on cold reads because the readahead runs in
+    // parallel with our SHA-256 loop — disk isn't idle waiting for the
+    // hasher to catch up. Silently skipped on non-Unix targets.
+    #[cfg(target_os = "macos")]
+    darwin_prefetch(&f, total_bytes);
+    let mut f = f;
+    let mut hasher = Sha256::new();
+    // 8 MiB chunks: larger than 1 MiB gives the kernel a better hint for
+    // readahead and cuts the per-read syscall count by 8× at negligible
+    // memory cost. Anything much larger stops helping on macOS (HFS/APFS
+    // tends to cap sequential prefetch around 8–16 MiB).
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    let mut bytes_hashed: u64 = 0;
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("read {} during verify: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        bytes_hashed += n as u64;
+        progress(bytes_hashed, total_bytes);
+    }
+    // Final tick so the caller always gets a 100% emit even if the file
+    // grew mid-hash (unlikely — the file is under 0600 — but cheap).
+    progress(bytes_hashed, total_bytes);
+
+    let digest = hex_encode(hasher.finalize());
+    if !digest.eq_ignore_ascii_case(spec.sha256) {
+        return Err(format!(
+            "GGUF integrity check failed for {}: expected SHA256 {}, got {}. \
+             File may have been tampered with since install. Delete with \
+             `/arcterm-models`-driven uninstall and re-download.",
+            spec.id, spec.sha256, digest
+        ));
+    }
+    log::info!(
+        "GGUF integrity verified: {} matches pinned SHA256",
+        spec.id
+    );
+    Ok(())
+}
+
+/// macOS-only: kick off an async kernel readahead for the whole file.
+/// Uses `fcntl(fd, F_RDADVISE, &radvisory)` — Darwin's equivalent of
+/// `posix_fadvise(POSIX_FADV_WILLNEED)`. Fire-and-forget: the kernel
+/// pages-in as it can, our SHA loop consumes pages as they arrive.
+///
+/// F_RDADVISE value is 44 on Darwin (xnu-based kernels). We open-code
+/// the ffi rather than pull in `libc` just for this constant.
+#[cfg(target_os = "macos")]
+fn darwin_prefetch(f: &std::fs::File, total_bytes: u64) {
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    struct Radvisory {
+        ra_offset: i64,
+        ra_count: i32,
+    }
+    const F_RDADVISE: i32 = 44;
+
+    extern "C" {
+        #[link_name = "fcntl"]
+        fn fcntl_rdadvise(fd: i32, cmd: i32, arg: *const Radvisory) -> i32;
+    }
+
+    let adv = Radvisory {
+        ra_offset: 0,
+        // ra_count is int32; clamp for files near or past 2 GiB is
+        // unnecessary here because we pass a count not an end offset,
+        // but keep the saturating_as for safety. Files larger than
+        // 2 GiB still benefit — kernel will just prefetch the first
+        // 2 GiB async, which is plenty of lead for the hasher.
+        ra_count: total_bytes.min(i32::MAX as u64) as i32,
+    };
+    unsafe {
+        let _ = fcntl_rdadvise(f.as_raw_fd(), F_RDADVISE, &adv);
+    }
+}
+
+/// Local hex encoder so we don't pull in the `hex` crate just for this.
+/// Kept module-private — the downloader has its own inline copy; sharing
+/// would cross a module boundary for two call sites, not worth it.
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    let mut s = String::with_capacity(bytes.as_ref().len() * 2);
+    for b in bytes.as_ref() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 /// Return the registry annotated with install status. Used by the UI /
 /// slash-command help so users can see which variants are already local.
 #[derive(Debug, Clone, Serialize)]
@@ -248,7 +405,34 @@ pub fn cleanup_stranded_parts() -> (usize, u64) {
         if !is_part {
             continue;
         }
+        // SECURITY FIX: only preserve `.part` files whose stem maps to a
+        // current registry entry. Without this, any `*.part` the user's
+        // uid could write to `~/.arcterm/models/` would survive cleanup
+        // indefinitely, and a future `/arcterm-download` of a matching
+        // filename would treat the attacker-written prefix as resumable
+        // state — forcing a rehash of attacker bytes into our hasher
+        // before the real stream appends. Hash mismatch still fails the
+        // download (downstream defense), but cleanup is the right place
+        // to kill the squat. Unrecognized .part files are always deleted.
+        let Some(filename) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let expected_filename = filename.trim_end_matches(".part");
+        let in_registry = REGISTRY
+            .iter()
+            .any(|s| s.filename == expected_filename);
         let Ok(meta) = entry.metadata() else { continue };
+        if !in_registry {
+            bytes += meta.len();
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+                log::warn!(
+                    "removed unrecognized .part file (not in registry): {}",
+                    path.display()
+                );
+            }
+            continue;
+        }
         // Keep the .part if it's young enough to resume from. mtime works
         // for our needs — modified-recently means the download was still
         // writing not long ago.

@@ -27,6 +27,7 @@ interface Settings {
         mode?: string;
         localModel?: string;
         claudePath?: string;
+        verifyOnBoot?: boolean;
     };
 }
 
@@ -214,6 +215,31 @@ export class SettingsPanel {
             ),
         );
 
+        // Verify-on-boot — checkbox. Defaults to checked (secure).
+        // Unchecking trades the post-install-tamper-detection window
+        // (file replaced between app runs) for a ~15–300 s faster boot
+        // on slow disks. User-initiated swap paths still verify.
+        const verifyOnBootEl = document.createElement("input");
+        verifyOnBootEl.type = "checkbox";
+        verifyOnBootEl.name = "verifyOnBoot";
+        verifyOnBootEl.id = "arcterm-verify-on-boot";
+        // Default to true when the field is absent (older configs).
+        verifyOnBootEl.checked = settings.ai?.verifyOnBoot !== false;
+        const verifyLabel = document.createElement("label");
+        verifyLabel.htmlFor = "arcterm-verify-on-boot";
+        verifyLabel.style.display = "flex";
+        verifyLabel.style.alignItems = "center";
+        verifyLabel.style.gap = "8px";
+        verifyLabel.style.cursor = "pointer";
+        verifyLabel.append(verifyOnBootEl, document.createTextNode("Re-verify local model on every launch"));
+        this.form.append(
+            section(
+                "Local model integrity",
+                wrap(verifyLabel,
+                    "Hashes the GGUF before load to catch tampering since last verified download. Takes 15 s – 5 min depending on model size + disk speed. Uncheck if boot is too slow; user-initiated model switches still verify."),
+            ),
+        );
+
         // Actions: Save / Cancel.
         const actions = document.createElement("div");
         actions.className = "arcterm-settings-actions";
@@ -238,6 +264,9 @@ export class SettingsPanel {
         const aiMode = (fd.get("aiMode") as string | null) ?? "auto";
         const localModel = (fd.get("localModel") as string | null) ?? "";
         const claudePath = (fd.get("claudePath") as string | null) ?? "";
+        // Checkboxes only appear in FormData when checked; `get` returns
+        // null for an unchecked box. That's our "disable" signal.
+        const verifyOnBoot = fd.get("verifyOnBoot") !== null;
 
         this.statusEl.textContent = "Saving…";
         try {
@@ -252,6 +281,7 @@ export class SettingsPanel {
                     mode: aiMode,
                     localModel,
                     claudePath,
+                    verifyOnBoot,
                 },
             };
             await invoke("settings_set", { settings: next });

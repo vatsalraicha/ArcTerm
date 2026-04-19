@@ -73,6 +73,14 @@ interface AiStatus {
         quantization: string | null;
         parameters: string | null;
     } | null;
+    // Wave 2.5: non-null while the background GGUF verify+mmap task is
+    // in flight. Drives the "loading…" line in /arcterm-status and the
+    // toolbar pill.
+    local_loading?: {
+        id: string;
+        display_name: string;
+        quantization?: string | null;
+    } | null;
 }
 
 interface ProgressPayload {
@@ -380,6 +388,15 @@ async function cmdStatus(session: Session): Promise<void> {
  * when a variant is loaded, or a colored "ready" / "not loaded" fallback.
  */
 function formatLocalModel(status: AiStatus): string {
+    // Background load in flight (Wave 2.5 boot path). Surfaces the
+    // pending variant name so the user knows which file is being
+    // hashed+mmap'd, matching the toolbar pill's text.
+    if (status.local_loading) {
+        const q = status.local_loading.quantization
+            ? ` (${status.local_loading.quantization})`
+            : "";
+        return `\x1b[36mloading…\x1b[0m ${status.local_loading.display_name}${q}`;
+    }
     if (!status.local_available) {
         return "\x1b[33mnot loaded\x1b[0m";
     }

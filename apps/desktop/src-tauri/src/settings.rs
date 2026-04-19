@@ -76,6 +76,26 @@ pub struct AiSettings {
     /// Path override for the `claude` CLI. Empty = PATH lookup.
     #[serde(default)]
     pub claude_path: String,
+
+    /// SECURITY vs. UX escape hatch. When `true` (default), the Wave 2.5
+    /// background boot-load pass runs a full SHA-256 re-verify against
+    /// the registry pin before llama.cpp mmap's the file — closes the
+    /// post-install-tamper-across-reboots window (see GHSA-vgg9-87g3-85w8
+    /// and siblings, which fire at `gguf_init_from_file` time).
+    ///
+    /// Power users with slow disks (user-report: 5 min for an 8 GB GGUF)
+    /// can set this to `false` to skip the hash on boot. Trade-off:
+    /// the window from last-verified-download through next boot is
+    /// unprotected against same-uid on-disk tamper. All user-triggered
+    /// swap paths (ai_set_mode, ai_set_local_model, model_download
+    /// post-load) STILL verify unconditionally, so the weakening only
+    /// covers the restart-without-interacting-with-AI case.
+    #[serde(default = "default_verify_on_boot")]
+    pub verify_on_boot: bool,
+}
+
+fn default_verify_on_boot() -> bool {
+    true
 }
 
 impl Default for AiSettings {
@@ -84,6 +104,7 @@ impl Default for AiSettings {
             mode: default_mode(),
             local_model: default_local_model(),
             claude_path: String::new(),
+            verify_on_boot: default_verify_on_boot(),
         }
     }
 }

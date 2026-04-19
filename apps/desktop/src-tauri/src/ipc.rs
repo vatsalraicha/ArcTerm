@@ -304,7 +304,7 @@ pub async fn model_download(
         // with one download's bytes loaded under the other's filename.
         let _load_guard = router_arc.lock_loads().await;
         let load_result = tokio::task::spawn_blocking(move || {
-            crate::ai::local_llama::LocalLlamaBackend::load(path)
+            crate::ai::local_llama::LocalLlamaBackend::load_verified(path)
         })
         .await
         .map_err(|e| format!("load join: {e}"))?;
@@ -412,7 +412,7 @@ pub async fn ai_set_local_model(
         path.display()
     );
     let loaded = tokio::task::spawn_blocking(move || {
-        crate::ai::local_llama::LocalLlamaBackend::load(path)
+        crate::ai::local_llama::LocalLlamaBackend::load_verified(path)
     })
     .await
     .map_err(|e| format!("load join: {e}"))?
@@ -473,7 +473,7 @@ pub async fn ai_set_mode(
             .ok_or_else(|| "model path unavailable".to_string())?;
         log::info!("lazy-loading local model: id={} path={}", spec.id, path.display());
         let loaded = tokio::task::spawn_blocking(move || {
-            crate::ai::local_llama::LocalLlamaBackend::load(path)
+            crate::ai::local_llama::LocalLlamaBackend::load_verified(path)
         })
         .await
         .map_err(|e| format!("load join: {e}"))?
@@ -530,12 +530,25 @@ pub fn ai_status(
             }
         }
     });
+    // Loading state surfaces the Wave 2.5 background-load so the
+    // frontend toolbar pill can say "loading Gemma 4 E4B…" without
+    // having to subscribe to events before boot completes. Frontend
+    // calls this once at mount to get the initial state, then listens
+    // for ai://local-* events for live updates.
+    let loading = router.loading_info().map(|info| {
+        serde_json::json!({
+            "id": info.id,
+            "display_name": info.display_name,
+            "quantization": info.quantization,
+        })
+    });
     serde_json::json!({
         "mode": router.current_mode().as_str(),
         "active_id": active.id(),
         "active_display_name": active.display_name(),
         "local_available": router.local_available(),
         "local_model": local_model,
+        "local_loading": loading,
     })
 }
 

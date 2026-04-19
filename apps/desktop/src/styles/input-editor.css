@@ -150,3 +150,53 @@
 .prompt-branch.hidden {
   display: none;
 }
+
+/* AI local-model status pill. Mounted next to the branch chip; shows the
+ * live state of the background GGUF load (loading / ready / failed).
+ * Hidden entirely in Claude-only mode — no signal to surface. The live
+ * region on the element lets screen readers announce state changes
+ * without stealing focus. */
+.prompt-ai-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--hover-bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin-left: auto;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.prompt-ai-status.hidden {
+  display: none;
+}
+.prompt-ai-status::before {
+  margin-right: 4px;
+  opacity: 0.8;
+}
+.prompt-ai-status.loading::before {
+  content: "⟳";
+  animation: prompt-ai-spin 1.1s linear infinite;
+  display: inline-block;
+}
+.prompt-ai-status.ready {
+  color: var(--success);
+  border-color: rgba(102, 187, 106, 0.25);
+}
+.prompt-ai-status.ready::before {
+  content: "✓";
+}
+.prompt-ai-status.failed {
+  color: var(--error);
+  border-color: rgba(239, 83, 80, 0.3);
+  cursor: help;
+}
+.prompt-ai-status.failed::before {
+  content: "✗";
+}
+@keyframes prompt-ai-spin {
+  to { transform: rotate(360deg); }
+}

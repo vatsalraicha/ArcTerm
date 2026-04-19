@@ -1,0 +1,32 @@
+# ArcTerm local Cargo config.
+#
+# Pins MACOSX_DEPLOYMENT_TARGET + CMAKE_OSX_DEPLOYMENT_TARGET to 11.0
+# for every build that originates inside this crate. Without this,
+# cc-rs's default of 10.13 leaks into the llama-cpp-sys-2 cmake
+# invocation; on modern Xcode SDKs (15+, macOS 15+ Sequoia / macOS 26)
+# the C++ `<filesystem>` headers mark `std::filesystem::path` as
+# `__OS_AVAILABILITY`-introduced in macOS 10.15, so the 10.13 target
+# makes the build fail with:
+#
+#     error: 'path' is unavailable: introduced in macOS 10.15
+#
+# which is the exact failure CLAUDE.md's "Gotchas" block documents.
+# CI sets these via workflow-level env; this file is the local
+# equivalent so `pnpm tauri build` (release) just works without the
+# user having to remember the incantation.
+#
+# 11.0 was picked because it's the lowest macOS version that supports
+# Apple Silicon natively (Big Sur introduced arm64 userland). Bumping
+# to 12.0 or later would shed a few unused compatibility shims but
+# gains nothing measurable.
+#
+# `force = true` is load-bearing. Without it, Cargo's `[env]` section
+# defers to any pre-existing value in the process env — and something
+# upstream (cc-rs's aarch64-darwin default, or Tauri CLI's own env
+# setup) already wedges MACOSX_DEPLOYMENT_TARGET=10.13 before Cargo
+# reads this file. Empirically observed in build logs as
+# `MACOSX_DEPLOYMENT_TARGET = Some(10.13)` despite this file setting
+# it to 11.0. `force = true` tells Cargo to overwrite regardless.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }
+CMAKE_OSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }

@@ -84,8 +84,17 @@ pub struct LocalLlamaBackend {
 impl LocalLlamaBackend {
     /// Load a GGUF model from disk. Blocking on disk I/O + (on Metal)
     /// shader compilation; callers should `spawn_blocking` this if they
-    /// care about keeping the async runtime responsive. Today the only
-    /// caller is router bootstrap, which runs before the window opens.
+    /// care about keeping the async runtime responsive.
+    ///
+    /// Does NOT verify the on-disk SHA against the registry — only use
+    /// this on the boot-critical path where the user is already waiting
+    /// on a black window. We trust the 0700 dir + 0600 file perms
+    /// applied at download time to prevent drive-by tampering; the
+    /// residual risk is a same-uid attacker with file-write capability,
+    /// which is a weaker threat than we can address without delaying
+    /// window creation by 15–40 s. All user-triggered swap paths
+    /// (ai_set_mode lazy-load, ai_set_local_model, model_download
+    /// post-load) go through `load_verified` instead.
     pub fn load(path: PathBuf) -> Result<Self, String> {
         let backend = Arc::new(
             LlamaBackend::init()
@@ -134,6 +143,19 @@ impl LocalLlamaBackend {
             model_path: path,
             display_label: "Gemma (local)",
         })
+    }
+
+    /// SECURITY: `load` + explicit SHA re-verify against the registry
+    /// pin. Used by every user-triggered swap path (ai_set_mode lazy-
+    /// load, ai_set_local_model, model_download post-load). Adds
+    /// ~15–40 s for a 3–8 GB file but the user already initiated the
+    /// swap and is waiting on a "loading model" spinner — very
+    /// different UX contract from boot. Prevents an attacker with
+    /// user-uid file-write access from planting a crafted GGUF that
+    /// gets mmap'd on the next mode switch.
+    pub fn load_verified(path: PathBuf) -> Result<Self, String> {
+        crate::models::verify_integrity(&path)?;
+        Self::load(path)
     }
 
     /// Look up the registry entry matching this model's file on disk, if

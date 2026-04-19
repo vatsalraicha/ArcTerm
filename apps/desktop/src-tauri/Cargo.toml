@@ -79,3 +79,33 @@ encoding_rs = "0.8"
 [features]
 # Tauri v2 expects a `custom-protocol` feature flag for the production build.
 custom-protocol = ["tauri/custom-protocol"]
+
+# Optimize hot crates even in `--debug` builds so local iteration
+# (`pnpm tauri build --debug`, `pnpm tauri dev`) doesn't cripple the
+# paths users spend most time waiting on:
+#
+# - `sha2`: boot-critical. The Wave 2.5 verify re-hashes up to 8 GB of
+#   GGUF. In debug mode the crate compiles without its SIMD + ASM
+#   paths, dropping throughput by 5-10×. A 5-min verify in debug
+#   becomes ~30 s with this override.
+# - `llama-cpp-sys-2`: inference hot path. Unoptimized C++ is
+#   unacceptably slow for any real test of local-model behavior.
+# - `encoding_rs`: token detokenization loop — same story, just less
+#   extreme.
+# - `reqwest`/`rustls`/`ring`: TLS during model download. Unoptimized
+#   ring turns a 3-minute model pull into 10+ minutes.
+#
+# Our own code stays at default opt-level so edit-compile loops stay
+# fast. Release builds were already opt-level=3 everywhere.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.encoding_rs]
+opt-level = 3
+[profile.dev.package."llama-cpp-sys-2"]
+opt-level = 3
+[profile.dev.package.reqwest]
+opt-level = 3
+[profile.dev.package.rustls]
+opt-level = 3
+[profile.dev.package.ring]
+opt-level = 3

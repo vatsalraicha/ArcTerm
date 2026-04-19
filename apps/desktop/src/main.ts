@@ -34,6 +34,7 @@ window.addEventListener("DOMContentLoaded", () => {
   const editorHost = requireEl("input-editor-host");
   const cwdLabel = requireEl("prompt-cwd");
   const branchLabel = requireEl("prompt-branch");
+  const aiStatus = requireEl("ai-status");
   const overlayHost = requireEl("app");
   const sidebarRoot = requireEl("sidebar");
   const sessionListEl = requireEl("session-list") as HTMLUListElement;
@@ -45,6 +46,7 @@ window.addEventListener("DOMContentLoaded", () => {
     editorHost,
     cwdLabel,
     branchLabel,
+    aiStatus,
     overlayHost,
     sidebarRoot,
     sessionListEl,
@@ -64,6 +66,7 @@ interface Mounts {
   editorHost: HTMLElement;
   cwdLabel: HTMLElement;
   branchLabel: HTMLElement;
+  aiStatus: HTMLElement;
   overlayHost: HTMLElement;
   sidebarRoot: HTMLElement;
   sessionListEl: HTMLUListElement;
@@ -83,6 +86,17 @@ async function boot(mounts: Mounts): Promise<void> {
   const savedTheme = await readSavedTheme();
   applyTheme(savedTheme, manager);
   registerThemeApplier((next) => applyTheme(next, manager));
+
+  // --- AI local-model status pill ------------------------------------
+  //
+  // Wave 2.5: the backend defers the 15–40 s SHA-verify + GGUF mmap
+  // off the boot critical path. While it runs in the background, we
+  // reflect state in the toolbar so the user understands why local AI
+  // isn't instantly available.
+  //
+  // Subscribe before the initial `ai_status` fetch so we don't miss a
+  // "ready" event that fires between fetch and listener registration.
+  wireAiStatusPill(mounts.aiStatus);
 
   // --- Prompt bar ------------------------------------------------------
   // HOME is inferred from the first cwd any session reports (shells start
@@ -365,8 +379,16 @@ async function boot(mounts: Mounts): Promise<void> {
   //
   // Availability check gates the keybindings: if `claude` isn't on PATH
   // we leave the shortcuts unbound rather than opening a broken panel.
-  // The check is cached — one invocation at startup.
-  const aiAvailable = await aiIsAvailable();
+  // The check is cached — one invocation at startup, plus a re-check
+  // on `ai://local-ready` so users whose only backend is the local
+  // model (Claude not installed) get the shortcuts bound as soon as
+  // the background load finishes.
+  let aiAvailable = await aiIsAvailable();
+  void listen("ai://local-ready", async () => {
+    if (!aiAvailable) {
+      aiAvailable = await aiIsAvailable(true);
+    }
+  });
   const aiPanel = new AiPanel({
     host: mounts.overlayHost,
     runCommand: (cmd) => {
@@ -490,6 +512,202 @@ async function boot(mounts: Mounts): Promise<void> {
   // The manager fires `active-changed` during create → renderPromptBar
   // already ran with the new session. Just focus the editor.
   editor.focus();
+}
+
+/**
+ * Toolbar pill that reflects the Wave 2.5 background local-model load:
+ * loading → ready → (fade out) or loading → failed.
+ *
+ * Listens for three backend events emitted from `lib.rs::spawn_local_load`:
+ *   - `ai://local-loading`      → {id, display_name, quantization}
+ *   - `ai://local-ready`        → {id, display_name, quantization}
+ *   - `ai://local-load-failed`  → {id, error}
+ *
+ * Also does a one-shot `ai_status` IPC to derive initial state — covers
+ * the frontend-reload (⌘R) case where the backend's load is already in
+ * flight and we'd otherwise miss the "loading" event that fired at boot.
+ *
+ * Claude-only mode: the backend's setup hook short-circuits before
+ * emitting any events and `local_loading` in `ai_status` is null, so
+ * the pill stays hidden. No UX artifact for users who don't use local.
+ */
+function wireAiStatusPill(el: HTMLElement): void {
+  type LoadPayload = { id: string; display_name: string; quantization?: string };
+  type ProgressPayload = {
+    id: string;
+    phase: "verify" | "compiling";
+    percent: number;
+  };
+  type FailPayload = { id: string; error: string };
+
+  const show = (cls: "loading" | "ready" | "failed", text: string, title?: string) => {
+    el.classList.remove("hidden", "loading", "ready", "failed");
+    el.classList.add(cls);
+    el.textContent = text;
+    if (title) el.title = title;
+    else el.removeAttribute("title");
+  };
+  const hide = () => {
+    el.classList.add("hidden");
+    el.classList.remove("loading", "ready", "failed");
+    el.textContent = "";
+    el.removeAttribute("title");
+  };
+
+  // Strip the parenthetical variant details from display names for the
+  // pill — "Gemma 4 E4B (Q8_0, high quality)" → "Gemma 4 E4B". The full
+  // label (including quant + params) goes into the hover tooltip so no
+  // information is lost.
+  const shortName = (name: string): string =>
+    name.replace(/\s*\(.*\)\s*$/, "").trim();
+
+  const fullLabel = (p: { display_name: string; quantization?: string }): string =>
+    p.quantization && !p.display_name.includes(p.quantization)
+      ? `${p.display_name} (${p.quantization})`
+      : p.display_name;
+
+  let readyFadeTimer: number | undefined;
+  const clearFadeTimer = () => {
+    if (readyFadeTimer !== undefined) {
+      window.clearTimeout(readyFadeTimer);
+      readyFadeTimer = undefined;
+    }
+  };
+
+  // Cache the short display name from the initial "loading" event so
+  // progress ticks don't need to re-derive it (progress payloads only
+  // carry id + phase + percent). Elapsed time is derived from
+  // `loadStartedAt`; we redraw every second via `tickTimer` so the
+  // counter stays fresh even between integer-percent boundaries.
+  let currentShortName = "";
+  let currentFullLabel = "";
+  let currentPhase: "verify" | "compiling" = "verify";
+  let currentPercent = 0;
+  let loadStartedAt: number | null = null;
+  let tickTimer: number | undefined;
+
+  const formatElapsed = (ms: number): string => {
+    const secs = Math.floor(ms / 1000);
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  };
+
+  const renderPill = () => {
+    const elapsed = loadStartedAt !== null
+      ? ` · ${formatElapsed(performance.now() - loadStartedAt)}`
+      : "";
+    const label = currentShortName || "model";
+    if (currentPhase === "verify") {
+      show(
+        "loading",
+        `Verifying · ${label} · ${currentPercent}%${elapsed}`,
+        currentFullLabel || undefined,
+      );
+    } else {
+      show(
+        "loading",
+        `Loading model · ${label}${elapsed}`,
+        currentFullLabel || undefined,
+      );
+    }
+  };
+
+  const stopTick = () => {
+    if (tickTimer !== undefined) {
+      window.clearInterval(tickTimer);
+      tickTimer = undefined;
+    }
+    loadStartedAt = null;
+  };
+
+  listen<LoadPayload>("ai://local-loading", (ev) => {
+    clearFadeTimer();
+    currentShortName = shortName(ev.payload.display_name);
+    currentFullLabel = fullLabel(ev.payload);
+    currentPhase = "verify";
+    currentPercent = 0;
+    loadStartedAt = performance.now();
+    renderPill();
+    stopTick();
+    tickTimer = window.setInterval(renderPill, 1000);
+  });
+
+  listen<ProgressPayload>("ai://local-loading-progress", (ev) => {
+    currentPhase = ev.payload.phase;
+    currentPercent = ev.payload.percent;
+    // If we never saw the initial "loading" event (e.g. frontend reload
+    // mid-verify), still start ticking from now so the user gets a
+    // reasonable elapsed counter. It's a relative undercount but
+    // better than showing nothing.
+    if (loadStartedAt === null) {
+      loadStartedAt = performance.now();
+      if (tickTimer === undefined) {
+        tickTimer = window.setInterval(renderPill, 1000);
+      }
+    }
+    renderPill();
+  });
+
+  listen<LoadPayload>("ai://local-ready", (ev) => {
+    clearFadeTimer();
+    // Capture the total elapsed time for a one-off "ready in Xs" hint —
+    // tells the user roughly what to expect on future boots.
+    const elapsedSuffix = loadStartedAt !== null
+      ? ` · ${formatElapsed(performance.now() - loadStartedAt)}`
+      : "";
+    stopTick();
+    show(
+      "ready",
+      `${shortName(ev.payload.display_name)} · ready${elapsedSuffix}`,
+      fullLabel(ev.payload),
+    );
+    // Auto-hide the "ready" confirmation after 4 s. Loading and failed
+    // states are persistent — the former because progress matters, the
+    // latter so the user can investigate.
+    readyFadeTimer = window.setTimeout(() => hide(), 4000);
+  });
+
+  listen<FailPayload>("ai://local-load-failed", (ev) => {
+    clearFadeTimer();
+    stopTick();
+    show("failed", "Load failed", ev.payload.error);
+  });
+
+  // Derive initial state in case a load is already in flight (frontend
+  // reload mid-boot). `ai_status` returns a `local_loading` object when
+  // one is running; otherwise nothing to do.
+  void (async () => {
+    try {
+      const status = await invoke<{
+        local_loading?: { id: string; display_name: string; quantization?: string } | null;
+        local_available: boolean;
+      }>("ai_status");
+      if (status.local_loading) {
+        // Populate the pill state as if the `ai://local-loading` event
+        // had just fired. Without this, a race where the backend emits
+        // `local-loading` before the frontend registers the listener
+        // leaves `currentShortName` empty, and subsequent progress
+        // events render the "model" generic fallback instead of
+        // "Gemma 4 E4B". Also seeds `loadStartedAt` so the elapsed
+        // counter starts ticking — undercounts by whatever delta
+        // between backend emit and this fetch, but beats 0.
+        currentShortName = shortName(status.local_loading.display_name);
+        currentFullLabel = fullLabel(status.local_loading);
+        currentPhase = "verify";
+        currentPercent = 0;
+        loadStartedAt = performance.now();
+        renderPill();
+        if (tickTimer === undefined) {
+          tickTimer = window.setInterval(renderPill, 1000);
+        }
+      }
+    } catch (err) {
+      // ai_status is optional — renderer fails gracefully if the router
+      // state isn't registered (pure Claude-less + no local installed
+      // boot path). Just leave the pill hidden.
+      console.debug("ai_status unavailable on initial fetch:", err);
+    }
+  })();
 }
 
 /**

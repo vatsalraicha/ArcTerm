@@ -34,6 +34,15 @@ pub enum Mode {
     Auto,
 }
 
+/// Snapshot of which model is being background-loaded right now. Lives on
+/// the router so any handler (and `ai_status`) can surface the state.
+#[derive(Debug, Clone)]
+pub struct LoadingInfo {
+    pub id: String,
+    pub display_name: String,
+    pub quantization: String,
+}
+
 impl Mode {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
@@ -60,6 +69,12 @@ pub struct AiRouter {
     local: RwLock<Option<Arc<LocalLlamaBackend>>>,
     active: RwLock<Arc<dyn AiBackend>>,
     mode: RwLock<Mode>,
+    /// Background boot-load state. Set to Some(info) while the Wave 2.5
+    /// post-window setup task is hashing + mmap'ing the GGUF; cleared
+    /// to None on success (install_local replaces it) or on failure.
+    /// The AI panel + toolbar status pill read this to show the right
+    /// "loading" / "ready" / "failed" text.
+    loading: RwLock<Option<LoadingInfo>>,
     /// SECURITY FIX (#2, TOCTOU): serializes every load / unload / delete
     /// on the local model slot. Previously `ai_set_local_model`,
     /// `ai_set_mode`'s lazy-load branch, `model_download`'s post-download
@@ -90,8 +105,23 @@ impl AiRouter {
             local: RwLock::new(local),
             active: RwLock::new(active),
             mode: RwLock::new(resolved),
+            loading: RwLock::new(None),
             load_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Mark a background load as in-flight. Used by the Wave 2.5 boot
+    /// path so the toolbar pill + ai_status can report "loading…".
+    pub fn set_loading(&self, info: Option<LoadingInfo>) {
+        *self.loading.write() = info;
+    }
+
+    /// Snapshot the current background-load state, if any. Returns None
+    /// when nothing is loading (either because the load finished, failed,
+    /// or was never started — the caller discriminates via other fields
+    /// on `ai_status`).
+    pub fn loading_info(&self) -> Option<LoadingInfo> {
+        self.loading.read().clone()
     }
 
     /// Acquire the serialization lock for load / unload / delete operations.
