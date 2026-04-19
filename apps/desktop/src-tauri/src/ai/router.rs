@@ -60,6 +60,18 @@ pub struct AiRouter {
     local: RwLock<Option<Arc<LocalLlamaBackend>>>,
     active: RwLock<Arc<dyn AiBackend>>,
     mode: RwLock<Mode>,
+    /// SECURITY FIX (#2, TOCTOU): serializes every load / unload / delete
+    /// on the local model slot. Previously `ai_set_local_model`,
+    /// `ai_set_mode`'s lazy-load branch, `model_download`'s post-download
+    /// load, and `model_delete` each did their own `is_installed()` check
+    /// before calling `LocalLlamaBackend::load(path)` — the window between
+    /// check and load let a concurrent `model_delete` remove the file
+    /// mid-load (→ mmap of partially-written bytes → SIGBUS), or let a
+    /// concurrent `model_download` replace the file under the loader.
+    /// Holding this lock across the whole check-then-act sequence closes
+    /// the race. tokio::sync::Mutex because handlers are async and hold
+    /// the guard across `spawn_blocking(...).await`.
+    load_lock: tokio::sync::Mutex<()>,
 }
 
 impl AiRouter {
@@ -78,7 +90,16 @@ impl AiRouter {
             local: RwLock::new(local),
             active: RwLock::new(active),
             mode: RwLock::new(resolved),
+            load_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Acquire the serialization lock for load / unload / delete operations.
+    /// Callers MUST hold the returned guard across the whole
+    /// `is_installed → LocalLlamaBackend::load → install_local` (or
+    /// equivalent) sequence so concurrent handlers can't race.
+    pub async fn lock_loads(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.load_lock.lock().await
     }
 
     /// Swap the active backend. Returns an error if the requested mode

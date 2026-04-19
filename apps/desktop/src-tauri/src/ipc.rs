@@ -293,6 +293,11 @@ pub async fn model_download(
     if let Ok(path) = &result {
         let path = PathBuf::from(path);
         let router_arc = router.inner().clone();
+        // SECURITY FIX (#2 TOCTOU): serialize post-download load with any
+        // concurrent delete / set_local_model. Without this, a user racing
+        // `/arcterm-download foo` and `/arcterm-download bar` could land
+        // with one download's bytes loaded under the other's filename.
+        let _load_guard = router_arc.lock_loads().await;
         let load_result = tokio::task::spawn_blocking(move || {
             crate::ai::local_llama::LocalLlamaBackend::load(path)
         })
@@ -334,12 +339,19 @@ pub async fn model_delete(
 ) -> Result<(), String> {
     let spec = models::find(&id)
         .ok_or_else(|| format!("unknown model id: {id}"))?;
-    downloader::uninstall(spec).await?;
-    // Drop our in-memory copy of this backend if it was the active one.
-    // Today we only ship one local model slot, so uninstall always
-    // empties the local backend. Multi-model support (Phase 7) will
-    // need to check id equality.
+    // SECURITY FIX (#2 TOCTOU): take the load lock BEFORE unlinking the
+    // GGUF. A concurrent set_local_model / set_mode lazy-load would
+    // otherwise see the file still on disk during its is_installed()
+    // check, then hit a missing-file or half-deleted-file error inside
+    // llama-cpp-2's mmap. Drop the in-memory backend first so any live
+    // handle is released before the file goes away.
+    let router_arc = router.inner().clone();
+    let _load_guard = router_arc.lock_loads().await;
+    // Today we only ship one local model slot, so uninstall_local always
+    // empties the local backend. Multi-model support (Phase 7) will need
+    // to check id equality before dropping.
     router.inner().uninstall_local();
+    downloader::uninstall(spec).await?;
     Ok(())
 }
 
@@ -363,6 +375,12 @@ pub async fn ai_set_local_model(
 ) -> Result<(), String> {
     let spec = models::find(&id)
         .ok_or_else(|| format!("unknown model id: {id}"))?;
+    // SECURITY FIX (#2 TOCTOU): hold the router's load_lock across the
+    // whole `is_installed → load → install_local` sequence so a concurrent
+    // model_delete / model_download can't remove or overwrite the GGUF
+    // between our check and the mmap inside llama-cpp-2.
+    let router_arc = router.inner().clone();
+    let _load_guard = router_arc.lock_loads().await;
     if !spec.is_installed() {
         return Err(format!(
             "Model '{id}' is not downloaded. Run /arcterm-download {id} first."
@@ -426,6 +444,18 @@ pub async fn ai_set_mode(
     // user sees the "thinking" of the UI during load instead of a
     // frozen window.
     if matches!(parsed, Mode::Local | Mode::Auto) && !router.inner().local_available() {
+        // SECURITY FIX (#2 TOCTOU): same serialization as ai_set_local_model.
+        // The lazy-load branch does its own is_installed() → load dance and
+        // previously had the same race against model_delete / download.
+        let router_arc = router.inner().clone();
+        let _load_guard = router_arc.lock_loads().await;
+        // Re-check local_available under the lock — another handler may have
+        // loaded a model while we were awaiting the guard.
+        if router.inner().local_available() {
+            router.inner().set_mode(parsed)?;
+            store.inner().update(|s| s.ai.mode = parsed.as_str().to_string())?;
+            return Ok(());
+        }
         let pinned_id = store.inner().get().ai.local_model;
         let spec = models::find(&pinned_id)
             .filter(|s| s.is_installed())
