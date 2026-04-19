@@ -139,9 +139,21 @@ impl AiContext {
 /// fill in the rest (shell, recent history, dir listing).
 ///
 /// Purely additive to the seed — we never overwrite fields the caller set.
+///
+/// SECURITY: `include_history` gates `recent_commands` population. Command-
+/// generation mode (Cmd+K, `?` prefix) passes `false` because recent-
+/// command history is a prompt-injection vector: one malicious command
+/// that landed in history (via compromised renderer or failing-output
+/// chain) would otherwise poison every subsequent `?`-prefix request in
+/// the same cwd with attacker-chosen text. Explain mode keeps history
+/// on — the user explicitly invoked it, and the history gives the model
+/// useful grounding for "why did this fail" questions. Wave-1 history
+/// sanitation strips control chars at write time; this is the second
+/// line of defense at read time.
 pub fn enrich(
     seed: AiContext,
     history: Option<&HistoryStore>,
+    include_history: bool,
 ) -> AiContext {
     let mut ctx = seed;
 
@@ -149,8 +161,7 @@ pub fn enrich(
         ctx.shell = std::env::var("SHELL").ok();
     }
 
-    // Pull recent commands — prefer same-cwd ones, fall back to any.
-    if ctx.recent_commands.is_empty() {
+    if include_history && ctx.recent_commands.is_empty() {
         if let Some(store) = history {
             let entries = store
                 .search("", ctx.cwd.as_deref(), MAX_HISTORY_ENTRIES as u32)

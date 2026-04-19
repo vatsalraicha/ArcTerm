@@ -26,7 +26,9 @@ import {
     aiAsk,
     aiStream,
     aiActiveBackend,
+    classifyRisk,
     extractCommand,
+    hasDangerousInvisibles,
     type AiContext,
 } from "./ai";
 
@@ -254,8 +256,21 @@ export class AiPanel {
                 context: this.opts.getContext(),
             });
             const cmd = extractCommand(res.text);
+            // `null` = extractor rejected the output. Two reasons today:
+            // the model returned empty/whitespace, or the candidate
+            // command contained Trojan-Source-class invisible chars
+            // (bidi overrides, zero-width splitters). Either way we
+            // refuse to surface a Run button.
+            if (!cmd) {
+                this.suggestedCommand = null;
+                this.output.textContent = hasDangerousInvisibles(res.text)
+                    ? "Rejected: the model's output contained invisible Unicode characters (possible prompt-injection attack). Try rephrasing."
+                    : "(no command returned)";
+                this.output.classList.add("has-content");
+                return;
+            }
             this.suggestedCommand = cmd;
-            this.output.textContent = cmd || "(no command returned)";
+            this.output.textContent = cmd;
             this.output.classList.add("has-content");
             this.renderCommandActions(cmd);
         } catch (err) {
@@ -322,24 +337,54 @@ export class AiPanel {
         this.actions.innerHTML = "";
         this.actions.classList.remove("hidden");
 
-        const run = button("Run", "primary", () => {
-            this.opts.runCommand(cmd);
-            this.close();
-        });
-        const edit = button("Edit", "ghost", () => {
-            this.opts.populateEditor(cmd);
-            this.close();
-        });
-        const copy = button("Copy", "ghost", () => {
-            navigator.clipboard.writeText(cmd).catch(() => {});
-        });
-        this.actions.append(run, edit, copy);
+        // SECURITY (Wave 3): AI-suggested commands that match a
+        // destructive heuristic go through a two-stage confirmation.
+        // First click: Run button swaps to a red "Confirm run" with
+        // the reason displayed. Second click actually submits. Edit
+        // and Copy stay available on both stages — users can inspect
+        // or sanitize the proposed command before committing.
+        const risk = classifyRisk(cmd);
+        let confirmed = false;
+
+        const renderButtons = () => {
+            this.actions.innerHTML = "";
+            if (risk) {
+                const warn = document.createElement("div");
+                warn.className = "arcterm-ai-risk";
+                warn.textContent = confirmed
+                    ? `Click "Confirm run" to execute — this matches: ${risk}`
+                    : `⚠ Destructive pattern detected: ${risk}. Review carefully before running.`;
+                this.actions.append(warn);
+            }
+            const runLabel = risk
+                ? (confirmed ? "Confirm run" : "Run…")
+                : "Run";
+            const runVariant: "primary" | "danger" = risk ? "danger" : "primary";
+            const run = button(runLabel, runVariant, () => {
+                if (risk && !confirmed) {
+                    confirmed = true;
+                    renderButtons();
+                    return;
+                }
+                this.opts.runCommand(cmd);
+                this.close();
+            });
+            const edit = button("Edit", "ghost", () => {
+                this.opts.populateEditor(cmd);
+                this.close();
+            });
+            const copy = button("Copy", "ghost", () => {
+                navigator.clipboard.writeText(cmd).catch(() => {});
+            });
+            this.actions.append(run, edit, copy);
+        };
+        renderButtons();
     }
 }
 
 function button(
     label: string,
-    variant: "primary" | "ghost",
+    variant: "primary" | "ghost" | "danger",
     onClick: () => void,
 ): HTMLButtonElement {
     const b = document.createElement("button");
@@ -367,14 +412,17 @@ function buildExplainPrompt(
 
 /**
  * Grab the last fenced one-liner from the explain output so we can surface
- * a "Run fix" button. Returns null if no runnable suggestion is present.
+ * a "Run fix" button. Returns null if no runnable suggestion is present,
+ * or if the candidate contains Trojan-Source-class invisible characters
+ * (same security gate as `extractCommand`).
  */
 function extractFixCommand(text: string): string | null {
-    // Match a trailing ```sh|bash|zsh fence with a single non-empty line.
     const m = text.match(/```(?:sh|bash|zsh)?\s*\n([^\n]+?)\n```\s*$/);
     if (!m) return null;
     const line = m[1].trim();
-    return line.length > 0 ? line : null;
+    if (!line) return null;
+    if (hasDangerousInvisibles(line)) return null;
+    return line;
 }
 
 function formatError(err: unknown): string {

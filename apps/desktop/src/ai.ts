@@ -148,8 +148,36 @@ export function aiStream(
 }
 
 /**
+ * SECURITY: Unicode codepoints whose presence in an AI-generated command
+ * indicates a Trojan-Source-style visual/byte mismatch attack
+ * (CVE-2021-42574 class).
+ *
+ *   - Bidi controls (U+202A-E, U+2066-9): reverse the visual reading
+ *     order so the displayed text looks benign while the bytes sent
+ *     to the shell are malicious.
+ *   - Zero-width characters (U+200B-D, U+FEFF, U+2060): invisible
+ *     separators that can split or embed payload text inside what
+ *     looks like an ordinary identifier.
+ *   - Line/paragraph separators (U+2028-9): can terminate a shell
+ *     line in ways the user won't see when the model's output is
+ *     rendered as plain text.
+ *   - Other known-invisible codepoints (soft hyphen U+00AD,
+ *     combining-grapheme-joiner U+034F, various Hangul fillers and
+ *     Mongolian vowel separator).
+ *
+ * On detection we reject the command outright — `extractCommand` and
+ * `extractFixCommand` return `null`. Callers surface a user-visible
+ * error instead of proposing the command; never silently strip, since
+ * attackers could craft the remainder to still be destructive even
+ * after the invisibles are removed.
+ */
+const DANGEROUS_INVISIBLE_CHARS =
+    /[\u00AD\u034F\u115F\u1160\u17B4\u17B5\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\u3164\uFEFF]/;
+
+/**
  * Utility: strip markdown fences + reasoning blocks from a model-generated
- * one-line command.
+ * one-line command and reject any string with Trojan-Source-class
+ * invisible characters.
  *
  * Reasoning blocks: Gemma 4 (and other models with chat templates that
  * trigger a "thinking" mode) emit `<think>...</think>` before the final
@@ -158,19 +186,85 @@ export function aiStream(
  * Markdown fences: models occasionally wrap single-line commands in
  * ```` ```bash ... ``` ```` despite instructions to the contrary. We
  * unwrap to the inner line.
+ *
+ * Returns the cleaned command string, or `null` if the model's output
+ * is rejected (empty or contains dangerous invisibles).
  */
-export function extractCommand(raw: string): string {
+export function extractCommand(raw: string): string | null {
     let s = raw.trim();
-    // Drop any <think>...</think> blocks (reasoning traces). Non-greedy
-    // multiline so multiple blocks get stripped independently.
     s = s.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-    // Drop leading/trailing ``` fences with optional language tag.
     s = s.replace(/^```[a-zA-Z0-9_-]*\s*\n?/, "");
     s = s.replace(/\n?```\s*$/, "");
-    // Take the first non-blank line.
     const line = s
         .split("\n")
         .map((l) => l.trim())
         .find((l) => l.length > 0);
-    return (line ?? s).trim();
+    const cmd = (line ?? s).trim();
+    if (!cmd) return null;
+    if (DANGEROUS_INVISIBLE_CHARS.test(cmd)) {
+        return null;
+    }
+    return cmd;
+}
+
+/**
+ * Re-exported for call sites that need to surface the rejection reason
+ * (AI panel "Run fix" → "extractFixCommand" → user-visible error). Kept
+ * as a separate function rather than a single `Result`-like return so
+ * the ~95% common case (clean output) doesn't pay an object-alloc tax.
+ */
+export function hasDangerousInvisibles(s: string): boolean {
+    return DANGEROUS_INVISIBLE_CHARS.test(s);
+}
+
+/**
+ * SECURITY: patterns that mark an AI-suggested command as potentially
+ * destructive. When `classifyRisk` returns non-null, the AI panel's Run
+ * button is styled differently and requires a second explicit click
+ * (with the matched pattern surfaced in a warning banner) before the
+ * command reaches the PTY.
+ *
+ * The list is deliberately conservative — false positives cost one
+ * extra click; false negatives let a prompt-injected `rm -rf ~` land
+ * with the same UX as `ls`. Ordered so the FIRST match is the most
+ * informative reason to show the user.
+ */
+interface RiskPattern {
+    re: RegExp;
+    reason: string;
+}
+
+const RISK_PATTERNS: RiskPattern[] = [
+    { re: /:\(\s*\)\s*\{/, reason: "fork-bomb pattern" },
+    { re: /\brm\b.*(-[a-z]*[rf]|--recursive|--force)/i, reason: "recursive/force rm" },
+    { re: /\brm\s+-[rf]+[a-z]*\s/i, reason: "rm with -r/-f flags" },
+    { re: /\brm\s+\/(?!tmp\b|var\/tmp\b)/i, reason: "rm targeting a root-level path" },
+    { re: /\bsudo\b/, reason: "sudo privilege escalation" },
+    { re: /\b(dd|mkfs|fdisk|shred|wipefs)\b/, reason: "raw disk / filesystem mutator" },
+    { re: /\bchmod\s+[-+]?[0-9]*[0-9][0-9][0-9]/, reason: "octal chmod" },
+    { re: /\bchown\b/, reason: "chown" },
+    { re: /\|\s*(sh|bash|zsh|fish)\b/, reason: "piping into a shell" },
+    { re: /\b(curl|wget|fetch)\b.*\|\s*(sh|bash|zsh)/i, reason: "curl-pipe-to-shell" },
+    { re: />\s*\/dev\/(?!null\b|stderr\b|stdout\b|tty\b)/, reason: "redirect to a device" },
+    { re: />\s*\/etc\//, reason: "redirect into /etc" },
+    { re: /\b(killall|pkill)\s+-9/, reason: "force-kill" },
+    { re: /\bgit\s+(push|reset|clean)\s+.*(--force|-f\b|--hard)/i, reason: "destructive git flag" },
+    { re: /\bnpm\s+(unpublish|publish)\b/, reason: "npm publish/unpublish" },
+    { re: /\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)/, reason: "docker destructive op" },
+];
+
+/**
+ * Run all patterns against `cmd`, return the first match's reason.
+ * `null` = command passes the heuristic with no warning. Not a
+ * security boundary on its own — social engineering can still get
+ * a careless user to click twice — but it raises the friction floor
+ * for the most common attack payloads.
+ */
+export function classifyRisk(cmd: string): string | null {
+    for (const pat of RISK_PATTERNS) {
+        if (pat.re.test(cmd)) {
+            return pat.reason;
+        }
+    }
+    return null;
 }

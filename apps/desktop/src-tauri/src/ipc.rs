@@ -153,8 +153,15 @@ pub async fn ai_ask(
     history: State<'_, HistoryStore>,
     req: AiRequest,
 ) -> Result<AiResponse, String> {
+    // SECURITY: only include recent-command history for Explain/Chat
+    // requests. Command-generation mode (Cmd+K, `?` prefix) bypasses
+    // history to deny prompt-injection-via-poisoned-history. See
+    // context::enrich for the threat model.
+    let include_history = !matches!(req.mode, crate::ai::AiMode::Command);
     let enriched = AiRequest {
-        context: req.context.map(|c| crate::ai::context::enrich(c, Some(history.inner()))),
+        context: req
+            .context
+            .map(|c| crate::ai::context::enrich(c, Some(history.inner()), include_history)),
         ..req
     };
     router.inner().ask(enriched).await
@@ -171,8 +178,11 @@ pub async fn ai_stream(
     req: AiRequest,
 ) -> Result<String, String> {
     let id = Uuid::new_v4().to_string();
+    let include_history = !matches!(req.mode, crate::ai::AiMode::Command);
     let enriched = AiRequest {
-        context: req.context.map(|c| crate::ai::context::enrich(c, Some(history.inner()))),
+        context: req
+            .context
+            .map(|c| crate::ai::context::enrich(c, Some(history.inner()), include_history)),
         ..req
     };
     let backend = router.inner().active();

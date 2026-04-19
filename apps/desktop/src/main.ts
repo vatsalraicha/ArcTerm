@@ -19,7 +19,7 @@ import { InputEditor } from "./input-editor";
 import { HistoryOverlay } from "./history-overlay";
 import { Sidebar } from "./sidebar";
 import { AiPanel, type ExplainTarget } from "./ai-panel";
-import { aiAsk, aiIsAvailable, extractCommand, type AiContext } from "./ai";
+import { aiAsk, aiIsAvailable, extractCommand, hasDangerousInvisibles, type AiContext } from "./ai";
 import { CompletionOverlay, type CompletionItem } from "./completion-overlay";
 import {
   isInternalCommand,
@@ -188,7 +188,18 @@ async function boot(mounts: Mounts): Promise<void> {
       });
       const cmd = extractCommand(resp.text);
       if (!cmd) {
-        console.warn(`ai: no command returned for "${query}"`);
+        // extractCommand returns null for two reasons: the model
+        // produced nothing usable, OR the candidate contained
+        // Trojan-Source-class invisible Unicode. Split so the user
+        // understands the second case is a security rejection, not
+        // a model failure.
+        if (hasDangerousInvisibles(resp.text)) {
+          console.warn(
+            `ai: rejected command for "${query}" — contains invisible Unicode (possible prompt-injection).`,
+          );
+        } else {
+          console.warn(`ai: no command returned for "${query}"`);
+        }
         editor.setValue(`? ${query}`);
         return;
       }

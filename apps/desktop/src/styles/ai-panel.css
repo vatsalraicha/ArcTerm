@@ -131,6 +131,40 @@
   color: var(--accent);
 }
 
+/* Wave 3: destructive-command variant of the Run button. Signals that
+ * the AI-suggested command matched a risky-heuristic pattern (rm -rf,
+ * sudo, curl | sh, raw disk ops …) and needs a deliberate second
+ * click before execution. Red-on-red draws the eye; the inline risk
+ * banner above (see .arcterm-ai-risk) explains which pattern matched. */
+.arcterm-ai-btn.danger {
+  background: var(--error);
+  color: white;
+  border: 1px solid var(--error);
+  font-weight: 600;
+}
+.arcterm-ai-btn.danger:hover {
+  filter: brightness(1.1);
+}
+
+.arcterm-ai-risk {
+  /* Full-width warning banner that appears above the Run/Edit/Copy row
+   * when classifyRisk() flags the suggested command. Two states:
+   *   - pre-click:  "⚠ Destructive pattern detected: <reason>. Review
+   *                  carefully before running."
+   *   - post-click: "Click 'Confirm run' to execute — this matches
+   *                  <reason>"
+   * The reason string is whatever classifyRisk returned verbatim. */
+  flex-basis: 100%;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(239, 83, 80, 0.12);
+  border: 1px solid rgba(239, 83, 80, 0.4);
+  border-radius: 4px;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .arcterm-ai-status {
   padding: 6px 14px;
   color: var(--muted);
