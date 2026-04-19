@@ -219,3 +219,118 @@ fn restrict_file(path: &Path) {
 }
 #[cfg(not(unix))]
 fn restrict_file(_path: &Path) {}
+
+/// SECURITY FIX: validate `ai.claudePath` before it reaches
+/// `ClaudeCliBackend::set_binary`. Without validation, a compromised
+/// renderer — or a socially-engineered user — could set this to any
+/// file on disk, and the next AI request would spawn that binary as a
+/// subprocess with the user's full privileges (env only partly scrubbed
+/// to strip Anthropic auth vars).
+///
+/// Empty string = PATH lookup, always allowed.
+///
+/// Non-empty requires ALL of:
+///   1. Absolute path (no relative paths sneaking in via CWD).
+///   2. Exists as a regular file — symlinks rejected because a symlink
+///      target can be swapped between this check and actual spawn.
+///   3. Owned by the current uid (a binary planted by another user in
+///      a shared path never gets executed under our uid).
+///   4. Not group- or world-writable (prevents drop-in replacement by
+///      any process sharing a less-privileged group with the user).
+///   5. Executable bit set for the owner.
+///
+/// On violation returns a human-readable error. The caller clears the
+/// field rather than persisting a poisonous value.
+pub fn validate_claude_path(path: &str) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Ok(());
+    }
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err(format!(
+            "claudePath must be an absolute path (got '{path}')"
+        ));
+    }
+    let meta = match fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(e) => return Err(format!("claudePath '{path}' not accessible: {e}")),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "claudePath '{path}' is a symlink; point to the real binary directly"
+        ));
+    }
+    if !meta.is_file() {
+        return Err(format!("claudePath '{path}' is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::PermissionsExt;
+        let uid = unsafe { libc_geteuid() };
+        if meta.uid() != uid {
+            return Err(format!(
+                "claudePath '{path}' not owned by current user (uid {uid}); \
+                 refusing to execute"
+            ));
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(format!(
+                "claudePath '{path}' is group- or world-writable (mode {:o}); \
+                 refusing to execute",
+                mode & 0o777
+            ));
+        }
+        if mode & 0o100 == 0 {
+            return Err(format!(
+                "claudePath '{path}' is not executable by owner (mode {:o})",
+                mode & 0o777
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Direct FFI into geteuid. We avoid importing a whole libc crate — it's
+// in the dep tree transitively but not directly, and this is the only
+// call site.
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "geteuid"]
+    fn libc_geteuid() -> u32;
+}
+#[cfg(not(unix))]
+unsafe fn libc_geteuid() -> u32 {
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_claude_path;
+
+    #[test]
+    fn empty_path_allowed() {
+        assert!(validate_claude_path("").is_ok());
+        assert!(validate_claude_path("   ").is_ok());
+    }
+
+    #[test]
+    fn relative_path_rejected() {
+        assert!(validate_claude_path("claude").is_err());
+        assert!(validate_claude_path("./claude").is_err());
+        assert!(validate_claude_path("../claude").is_err());
+    }
+
+    #[test]
+    fn nonexistent_path_rejected() {
+        assert!(validate_claude_path("/no/such/binary/claude-xyz-12345").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_rejected() {
+        // /tmp exists and is a directory on every unix; good negative test.
+        assert!(validate_claude_path("/tmp").is_err());
+    }
+}

@@ -332,6 +332,23 @@ async fn download_inner(
         .await
         .map_err(|e| format!("rename {}: {e}", local_path.display()))?;
 
+    // SECURITY FIX: match the 0600 we already apply to config.json and
+    // history.db. Parent dir is 0700 which blocks other local users,
+    // but consistent 0600 on the files themselves is defense-in-depth
+    // against same-uid processes with narrower expected access (e.g.
+    // sandboxed helpers, LaunchAgents running as the user). GGUFs are
+    // mmap'd by llama-cpp-2; we want any same-uid tamper to fail the
+    // open rather than succeed silently.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(
+            &local_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .await;
+    }
+
     Ok(local_path.to_string_lossy().into_owned())
 }
 

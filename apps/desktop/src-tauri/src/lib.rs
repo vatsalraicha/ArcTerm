@@ -125,8 +125,32 @@ pub fn run() {
     // SECURITY FIX: honor settings.ai.claudePath on boot. Previously the
     // field was persisted but ignored — users believed they had pinned a
     // path but PATH lookup still won.
-    let claude_concrete = Arc::new(ClaudeCliBackend::with_binary(
+    //
+    // SECURITY FIX (claudePath validation): validate the persisted path
+    // before loading it into the live backend. A config.json that was
+    // edited by an attacker (or an older ArcTerm that had no validator)
+    // could pin `ai.claudePath` to an arbitrary binary; without this
+    // guard, the very first `ai_is_available` probe on boot would spawn
+    // it. On violation, log and fall back to PATH lookup — don't refuse
+    // to boot, the terminal still works without AI.
+    let claude_path_at_boot = match settings::validate_claude_path(
         &initial_settings.ai.claude_path,
+    ) {
+        Ok(()) => initial_settings.ai.claude_path.as_str(),
+        Err(e) => {
+            log::warn!(
+                "rejecting persisted claudePath ('{}'): {}. Falling back to PATH lookup.",
+                initial_settings.ai.claude_path,
+                e
+            );
+            // Scrub the poisoned field from the in-memory store too, so
+            // the settings panel doesn't keep re-displaying it as saved.
+            let _ = settings.update(|s| s.ai.claude_path.clear());
+            ""
+        }
+    };
+    let claude_concrete = Arc::new(ClaudeCliBackend::with_binary(
+        claude_path_at_boot,
     ));
     let claude_backend: Arc<dyn AiBackend> = claude_concrete.clone();
 

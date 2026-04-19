@@ -246,8 +246,13 @@ pub fn settings_set(
     claude: State<'_, std::sync::Arc<crate::ai::claude::ClaudeCliBackend>>,
     settings: Settings,
 ) -> Result<(), String> {
-    // SECURITY FIX: apply the claudePath change to the live backend. Without
-    // this, persisting a new path had no effect until process restart.
+    // SECURITY FIX: validate claudePath before anything trusts it. An
+    // invalid path bubbles back to the settings panel as an error rather
+    // than being silently saved + then spawning an attacker binary on
+    // the next ⌘K. Empty string (PATH lookup) always passes.
+    crate::settings::validate_claude_path(&settings.ai.claude_path)?;
+    // Apply the claudePath change to the live backend. Without this,
+    // persisting a new path had no effect until process restart.
     claude.inner().set_binary(&settings.ai.claude_path);
     store.inner().set(settings)
 }
