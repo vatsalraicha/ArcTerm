@@ -17,6 +17,7 @@ use crate::ai::router::Mode;
 use crate::ai::{AiChunk, AiContext, AiRequest, AiResponse, AiRouter};
 use crate::completion::{complete as fs_complete_impl, CompletionResult};
 use crate::history::{Entry, HistoryStore};
+use crate::ipc_guard::{self, AuditEntry, AuditLog};
 use crate::models::{self, downloader, ModelInfo};
 use crate::pty::PtyManager;
 use crate::settings::{Settings, SettingsStore};
@@ -43,6 +44,7 @@ const PTY_WRITE_MAX_BYTES: usize = 1 << 20;
 #[tauri::command]
 pub fn pty_write(
     manager: State<'_, PtyManager>,
+    audit: State<'_, Arc<AuditLog>>,
     id: String,
     data: String,
 ) -> Result<(), String> {
@@ -53,6 +55,10 @@ pub fn pty_write(
             PTY_WRITE_MAX_BYTES
         ));
     }
+    // Wave 5: log the write + content-sniff for suspicious shapes.
+    // Never blocks; a matched flag just appears in /arcterm-audit.
+    let flag = ipc_guard::inspect_pty_write(&data);
+    audit.inner().log("pty_write", data.len() as u64, flag);
     manager.write(&id, &data)
 }
 
@@ -81,11 +87,13 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
 #[tauri::command]
 pub fn history_insert(
     store: State<'_, HistoryStore>,
+    audit: State<'_, Arc<AuditLog>>,
     command: String,
     cwd: Option<String>,
     started_at: i64,
     session_id: Option<String>,
 ) -> Result<i64, String> {
+    audit.inner().log("history_insert", command.len() as u64, None);
     store.insert(&command, cwd.as_deref(), started_at, session_id.as_deref())
 }
 
@@ -254,6 +262,7 @@ pub fn settings_get(store: State<'_, std::sync::Arc<SettingsStore>>) -> Settings
 pub fn settings_set(
     store: State<'_, std::sync::Arc<SettingsStore>>,
     claude: State<'_, std::sync::Arc<crate::ai::claude::ClaudeCliBackend>>,
+    audit: State<'_, Arc<AuditLog>>,
     settings: Settings,
 ) -> Result<(), String> {
     // SECURITY FIX: validate claudePath before anything trusts it. An
@@ -261,6 +270,14 @@ pub fn settings_set(
     // than being silently saved + then spawning an attacker binary on
     // the next ⌘K. Empty string (PATH lookup) always passes.
     crate::settings::validate_claude_path(&settings.ai.claude_path)?;
+    // Wave 5: audit trail. Settings writes are rare and high-impact
+    // (claudePath, verifyOnBoot), so every save lands in the log even
+    // when nothing looks suspicious. Size field = serialized payload
+    // byte length for a rough sanity check.
+    let payload_bytes = serde_json::to_vec(&settings)
+        .map(|v| v.len() as u64)
+        .unwrap_or(0);
+    audit.inner().log("settings_set", payload_bytes, None);
     // Apply the claudePath change to the live backend. Without this,
     // persisting a new path had no effect until process restart.
     claude.inner().set_binary(&settings.ai.claude_path);
@@ -280,8 +297,10 @@ pub async fn model_download(
     router: State<'_, std::sync::Arc<AiRouter>>,
     settings: State<'_, std::sync::Arc<SettingsStore>>,
     download_lock: State<'_, std::sync::Arc<downloader::DownloadLock>>,
+    audit: State<'_, Arc<AuditLog>>,
     id: String,
 ) -> Result<(), String> {
+    audit.inner().log("model_download", id.len() as u64, None);
     let spec = models::find(&id)
         .ok_or_else(|| format!("unknown model id: {id}"))?;
     let _guard = download_lock.inner().try_acquire(&id)?;
@@ -350,8 +369,10 @@ pub async fn model_download(
 #[tauri::command]
 pub async fn model_delete(
     router: State<'_, std::sync::Arc<AiRouter>>,
+    audit: State<'_, Arc<AuditLog>>,
     id: String,
 ) -> Result<(), String> {
+    audit.inner().log("model_delete", id.len() as u64, None);
     let spec = models::find(&id)
         .ok_or_else(|| format!("unknown model id: {id}"))?;
     // SECURITY FIX (#2 TOCTOU): take the load lock BEFORE unlinking the
@@ -560,6 +581,19 @@ pub fn ai_status(
         "local_model": local_model,
         "local_loading": loading,
     })
+}
+
+// -- Audit log ---------------------------------------------------------
+
+/// Wave 5 (lite): return the most recent audit entries. Backs the
+/// `/arcterm-audit` slash command. Never logs ITS OWN call — we don't
+/// want `/arcterm-audit` to pollute the trail it's surfacing.
+#[tauri::command]
+pub fn ipc_audit_tail(
+    audit: State<'_, Arc<AuditLog>>,
+    limit: Option<usize>,
+) -> Vec<AuditEntry> {
+    audit.inner().tail(limit.unwrap_or(50))
 }
 
 // -- Filesystem completion ---------------------------------------------

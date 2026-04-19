@@ -6,6 +6,7 @@ pub mod ai;
 pub mod completion;
 pub mod history;
 pub mod ipc;
+pub mod ipc_guard;
 pub mod models;
 pub mod pty;
 pub mod settings;
@@ -23,6 +24,7 @@ use ai::local_llama::LocalLlamaBackend;
 use ai::router::Mode;
 use ai::{AiBackend, AiRouter};
 use history::HistoryStore;
+use ipc_guard::AuditLog;
 use models::downloader::DownloadLock;
 use pty::PtyManager;
 use settings::SettingsStore;
@@ -167,6 +169,11 @@ pub fn run() {
     // Download lock: only one model download in flight at once.
     let download_lock: Arc<DownloadLock> = Arc::new(DownloadLock::default());
 
+    // Wave 5 (lite): in-memory audit log of sensitive IPC calls.
+    // Forensic trail for post-incident investigation — not a defense.
+    // See ipc_guard module docs for the scope rationale.
+    let audit_log: Arc<AuditLog> = Arc::new(AuditLog::new());
+
     // Wave 2.5: clones captured into the setup closure for the background
     // local-model load. The router + settings are also registered via
     // `.manage()` further down for IPC handlers; the clones here are a
@@ -273,7 +280,8 @@ pub fn run() {
         .manage(ai_router)
         .manage(settings)
         .manage(download_lock)
-        .manage(claude_concrete);
+        .manage(claude_concrete)
+        .manage(audit_log);
 
     // Only register the HistoryStore state when the DB opened cleanly.
     // Absent state makes history_* commands fail with a clear error rather
@@ -305,6 +313,7 @@ pub fn run() {
             ipc::model_download,
             ipc::model_delete,
             ipc::fs_complete,
+            ipc::ipc_audit_tail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ArcTerm");

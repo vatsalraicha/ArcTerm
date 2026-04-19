@@ -143,6 +143,9 @@ export async function runInternalCommand(
             case "arcterm-load":
                 await cmdLoad(session, args);
                 break;
+            case "arcterm-audit":
+                await cmdAudit(session, args);
+                break;
             default:
                 writeError(session, `Unknown command: ${name}`);
                 writeLine(
@@ -170,6 +173,7 @@ function writeHelp(session: Session): void {
         ["/arcterm-load <id>", "load a different installed model into memory"],
         ["/arcterm-theme [dark|light]", "show or set UI theme"],
         ["/arcterm-status", "show current AI router state"],
+        ["/arcterm-audit [N]", "show recent IPC audit log entries"],
     ];
     writeLine(session, "\x1b[1mArcTerm commands:\x1b[0m");
     for (const [cmd, desc] of rows) {
@@ -370,6 +374,60 @@ async function cmdLoad(session: Session, args: string[]): Promise<void> {
     } catch (err) {
         throw err instanceof Error ? err : new Error(String(err));
     }
+}
+
+/**
+ * /arcterm-audit [N] — show the last N entries of the IPC audit log.
+ *
+ * Wave 5 (lite) forensic surface. Defaults to the last 20 rows.
+ * Flagged entries (OSC 52 in pty_write, destructive substrings, etc.)
+ * render in red; normal entries in muted gray. The entire log is
+ * ring-buffered in memory, so old entries disappear on boot and a
+ * busy session caps out at 200 rows total.
+ *
+ * Not a security gate — purely for the user investigating "why did
+ * ArcTerm do X?" after a weirdness report. See ipc_guard.rs docs
+ * for the full rationale.
+ */
+interface AuditEntry {
+    command: string;
+    timestamp_ms: number;
+    bytes: number;
+    flag: string | null;
+}
+async function cmdAudit(session: Session, args: string[]): Promise<void> {
+    const limit = args.length > 0 ? Math.max(1, Math.min(200, parseInt(args[0], 10) || 20)) : 20;
+    const rows = await invoke<AuditEntry[]>("ipc_audit_tail", { limit });
+    if (rows.length === 0) {
+        writeLine(session, "\x1b[2m(audit log is empty)\x1b[0m");
+        return;
+    }
+    writeLine(
+        session,
+        `\x1b[1mRecent IPC calls\x1b[0m \x1b[2m(${rows.length} of up to 200 in ring buffer)\x1b[0m`,
+    );
+    // Newest last — matches the natural reading order of a log tail.
+    for (const row of rows) {
+        const when = new Date(row.timestamp_ms).toLocaleTimeString();
+        const cmd = row.command.padEnd(18);
+        const size = `${row.bytes}B`.padStart(8);
+        if (row.flag) {
+            writeLine(
+                session,
+                `  \x1b[2m${when}\x1b[0m \x1b[36m${cmd}\x1b[0m ${size}  \x1b[31m⚠ ${row.flag}\x1b[0m`,
+            );
+        } else {
+            writeLine(
+                session,
+                `  \x1b[2m${when}\x1b[0m \x1b[36m${cmd}\x1b[0m ${size}`,
+            );
+        }
+    }
+    writeLine(session, "");
+    writeLine(
+        session,
+        "\x1b[2mRed ⚠ rows flagged by the content sniffer — forensic only, never blocks.\x1b[0m",
+    );
 }
 
 async function cmdStatus(session: Session): Promise<void> {
