@@ -442,15 +442,20 @@ async function boot(mounts: Mounts): Promise<void> {
       return;
     }
 
-    // ⌘⇧] / ⌘⇧[  — next / previous tab (matches VSCode convention)
-    if (ev.shiftKey && (ev.key === "]" || ev.key === "[")) {
+    // ⌘⇧] / ⌘⇧[  — next / previous tab (matches VSCode convention).
+    //
+    // Match on ev.code (physical key), not ev.key. When Shift is held,
+    // ev.key transforms `[` → `{` and `]` → `}` on a US layout, so the
+    // earlier `ev.key === "["` check never fired. ev.code is layout-
+    // independent and unaffected by modifiers.
+    if (ev.shiftKey && (ev.code === "BracketRight" || ev.code === "BracketLeft")) {
       ev.preventDefault();
       const sessions = manager.list();
       if (sessions.length < 2) return;
       const curId = manager.activeSessionId;
       const curIdx = sessions.findIndex((s) => s.id === curId);
       if (curIdx === -1) return;
-      const delta = ev.key === "]" ? 1 : -1;
+      const delta = ev.code === "BracketRight" ? 1 : -1;
       const next = sessions[(curIdx + delta + sessions.length) % sessions.length];
       void manager.switchTo(next.id);
       return;

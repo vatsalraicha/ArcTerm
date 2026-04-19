@@ -77,7 +77,11 @@ export class SessionManager {
     /** Preserves creation order for Cmd+N lookups and sidebar rendering. */
     private readonly order: string[] = [];
     private activeId: string | null = null;
-    private nextOrdinal = 1;
+    /** Monotonic counter used ONLY to generate default session names
+     *  ("Session 3" stays "Session 3" even after earlier sessions close).
+     *  The keyboard ordinal (⌘1..⌘9) is recomputed from `order` position
+     *  by renumber() so closing sessions 1 and 2 doesn't strand ⌘1/⌘2. */
+    private nextNameIndex = 1;
 
     /** Mount point where each session's terminal-frame is appended. */
     private readonly stackHost: HTMLElement;
@@ -193,14 +197,16 @@ export class SessionManager {
         // visibility ourselves.
         writeWelcome(terminal);
 
-        const ordinal = this.nextOrdinal++;
+        const nameIndex = this.nextNameIndex++;
         const session: Session = {
             id: terminal.sessionId,
-            ordinal,
+            // Placeholder — renumber() below sets the real value based on
+            // this session's position in `order`.
+            ordinal: 0,
             terminal,
             frame,
             state: {
-                name: `Session ${ordinal}`,
+                name: `Session ${nameIndex}`,
                 cwd: null,
                 branch: "",
                 lastCommand: null,
@@ -213,6 +219,7 @@ export class SessionManager {
         };
         this.sessions.set(session.id, session);
         this.order.push(session.id);
+        this.renumber();
 
         // Wire per-session terminal events into state changes.
         // These don't need explicit cleanup because the TerminalHandle itself
@@ -291,6 +298,10 @@ export class SessionManager {
         // Remove from order + map first so listeners see a consistent state.
         this.order.splice(idx, 1);
         this.sessions.delete(id);
+        // Renumber surviving sessions so ⌘1..⌘9 continue to address the
+        // leftmost N sessions by position. Without this, closing session
+        // 1 left ⌘1 permanently dead.
+        this.renumber();
 
         // Kill the PTY + reap the shell. The Rust reader thread notices
         // the close and emits `pty://exit`; that's harmless now that we've
@@ -374,5 +385,17 @@ export class SessionManager {
 
     private emitUpdated(s: Session): void {
         for (const l of this.updatedListeners) l(s);
+    }
+
+    /**
+     * Assign each session its keyboard ordinal (1-indexed) based on current
+     * position in `order`. Called after every add/remove so ⌘1..⌘9 keep
+     * addressing the leftmost N sessions regardless of which ids got closed.
+     */
+    private renumber(): void {
+        for (let i = 0; i < this.order.length; i++) {
+            const s = this.sessions.get(this.order[i]);
+            if (s) s.ordinal = i + 1;
+        }
     }
 }
