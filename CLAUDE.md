@@ -143,18 +143,15 @@ ArcTerm/
 │               └── completion/
 │                   ├── mod.rs      dispatch: spec → fs fallback
 │                   ├── fs.rs       filesystem completion, shell_escape + unescape
-│                   └── specs.rs    Fig-spec registry, lookup by root command
+│                   └── specs.rs    Command-spec registry, lookup by root command
 ├── shell-integration/              included in binary via include_str!
 │   ├── arcterm.zsh                 prompt suppression, OSC 7/133/1337 emitters
 │   ├── arcterm.bash                bash-preexec-style hooks
 │   ├── arcterm.fish                native fish events
 │   └── zdotdir/{.zshenv,.zshrc}    chain-load user rc files, source arcterm.zsh
-├── scripts/
-│   ├── package.json                dev-only (typescript)
-│   └── import-fig-specs.mjs        AST walker, extracts static fields to bundle.json
 ├── pnpm-workspace.yaml             apps/* + packages/*
 ├── package.json                    workspace root
-└── .gitignore                      .claude/, briefs, .fig-autocomplete-source/
+└── .gitignore                      .claude/, briefs
 ```
 
 Not in the repo but expected on dev machine:
@@ -410,13 +407,15 @@ frontend writes the command manually via `writeRaw` after the pill
    on 206 responses; restarts cleanly on 200. SHA256 rehashes the
    existing .part before streaming continues.
 
-6. **Fig specs — 617 out of ~735.** Importer walks their `src/**/*.ts`,
-   extracts the static object-literal initializer (including arrow-
-   function-returning-object form), emits
-   `apps/desktop/src-tauri/completion-specs/bundle.json` (~10 MB). 54
-   are empty stubs we filter; 43 use patterns our AST walker doesn't
-   recognize. Re-run `scripts/import-fig-specs.mjs` after cloning
-   `.fig-autocomplete-source/` to refresh.
+6. **Command specs — 617 commands in `bundle.json`.** Seed content was
+   one-time-extracted from withfig/autocomplete TypeScript specs at
+   Fig SHA aef52ac; Fig was sunset Sep 2024 and we retired the importer.
+   `apps/desktop/src-tauri/completion-specs/bundle.json` (~10 MB) is
+   now ArcTerm's own format — `{names[], description, subcommands[],
+   options[]}`, recursive — and is maintained by direct JSON edits.
+   The original importer script is preserved in the `pre-fig-removal`
+   git tag; restore with `git show pre-fig-removal:scripts/import-fig-specs.mjs`
+   if you ever want to re-pull from a maintained Fig fork.
 
 7. **Don't use `execCommand("insertText")` in the input editor's paste
    handler.** WebKit's `insertText` silently **strips newline

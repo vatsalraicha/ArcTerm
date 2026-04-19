@@ -25,8 +25,11 @@ This project includes or depends on the following third-party works.
 Their own licenses apply to those portions:
 
   * Fig autocomplete specs (withfig/autocomplete) — MIT License.
-    Compiled into apps/desktop/src-tauri/completion-specs/bundle.json
-    via scripts/import-fig-specs.mjs.
+    The seed content of apps/desktop/src-tauri/completion-specs/bundle.json
+    was one-time-extracted from Fig's TypeScript specs at SHA aef52ac.
+    Fig was sunset by Amazon in Sep 2024; bundle.json is now maintained
+    directly in ArcTerm's own JSON format. The original importer script
+    is preserved in the `pre-fig-removal` git tag for historical reference.
     https://github.com/withfig/autocomplete
 
   * Gemma model weights — Google DeepMind, Apache License 2.0 /

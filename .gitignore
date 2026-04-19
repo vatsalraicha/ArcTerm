@@ -24,9 +24,12 @@ Dos_And_Donts.md
 Project_Prompt_Detailed.md
 Task_For_Session_*.md
 
-# Fig autocomplete source — cloned at build time by scripts/import-fig-specs.mjs,
-# not vendored. The extracted static JSON lives in apps/desktop/src-tauri/completion-specs/
-# and IS committed (that's what the app actually consumes).
+# Legacy Fig autocomplete clone. The importer that consumed this
+# (scripts/import-fig-specs.mjs) was retired after Fig was sunset by
+# Amazon in Sep 2024. bundle.json is now the source of truth. This
+# directory may linger on older dev machines from earlier imports —
+# ignore it defensively so `git add .` doesn't pull in ~50 MB of
+# abandoned upstream TypeScript. Safe to delete locally any time.
 .fig-autocomplete-source/
 
 # Logs
