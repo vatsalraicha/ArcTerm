@@ -22,11 +22,13 @@ cd apps/desktop/src-tauri && cargo check    # Rust
 cd apps/desktop && pnpm vite:build          # Frontend
 ```
 
-Latest commit (at the time of writing this doc): **`14b25fb`** —
-`docs: add SECURITY.md with private disclosure policy`. Community
-paperwork is now complete (Apache-2.0 relicensing + CoC + CONTRIBUTING
-+ SECURITY + structured issue templates); the last code change was
-`b244c78` fixing multi-line paste in the input editor.
+Latest commit (at the time of writing this doc): **`ad4a3e0`** —
+`chore: retire Fig import infrastructure, bundle.json is now source
+of truth`. The phase-8 security series (audit → waves 1–5 lite) has
+landed; community paperwork is complete; the Fig importer has been
+retired now that upstream is abandoned. The `pre-fig-removal` git
+tag preserves the importer for future recovery if ever needed. Most
+recent functional security work shipped as tag `v0.1.0-alpha.phase8.6`.
 
 ---
 
@@ -171,10 +173,19 @@ for spec regeneration, gitignored), `apps/desktop/src-tauri/target/` (Rust).
 | `v0.1.0-alpha.phase5a` | AiBackend trait + ClaudeCliBackend + ⌘K/⌘⇧E |
 | `v0.1.0-alpha.phase5b` | LocalLlamaBackend (Gemma 4, Metal) + AutoBackend + /arcterm-* |
 | `v0.1.0-alpha.phase7` | Polish batch (theme, CI, fig specs, icon, menu, many fixes) |
+| `v0.1.0-alpha.phase8` | First security audit + 14 fixes (CSP, fs perms, IPC hardening, …) |
+| `v0.1.0-alpha.phase8.1` | GGUF SHA pinning, IPC capability trim, OSC 133/1337 nonce auth |
+| `v0.1.0-alpha.phase8.2` | Post-audit wave 1: history sanitation, claudePath validation, 0600 GGUFs |
+| `v0.1.0-alpha.phase8.3` | Waves 2 + 2.5: verify-on-load, OSC 52/8 hardening, deferred boot-load + progress UI |
+| `v0.1.0-alpha.phase8.4` | Wave 3: AI-output Unicode rejection + destructive-command confirm + history exclusion |
+| `v0.1.0-alpha.phase8.5` | Wave 4: GGUF perm sweep, CSP dev/prod doc, Fig bundle sanity test, audit triage header |
+| `v0.1.0-alpha.phase8.6` | Wave 5 (lite): in-memory IPC audit log + pty_write sniffer + /arcterm-audit |
+| `pre-fig-removal` | Snapshot of scripts/import-fig-specs.mjs etc. before it was retired on main |
 
-Phase 6 (VS Code extension) intentionally skipped; will come after Phase 7
-is declared complete. Phase 7 is still open — global search and ⌘⏎ agent
-mode remain.
+Phase 6 (VS Code extension) intentionally skipped. Current plan: **NOT a
+v1.0 blocker** — ship v1.0 as desktop app first, extension can come as
+v1.x. Phase 7 is mostly done (see "Phase 7 status" below); the tail is
+folded into the beta roadmap.
 
 ---
 
@@ -434,31 +445,110 @@ frontend writes the command manually via `writeRaw` after the pill
 
 ---
 
-## Phase 7 status & what's left
+## Current status & roadmap
 
-### Done this phase
-Light theme · `.part` cleanup · SIGABRT drop-order · bash/fish hooks ·
-welcome banner · full Fig import · `?` prefix · download resume ·
-settings panel + ⌘, · completion bug fixes · block render rewrite ·
-right-click context menu · app icon · native macOS menu · CI + release
-workflows · model swap (settings + `/arcterm-load`) · multi-line paste
-fix (`b244c78`) · Apache-2.0 + CC BY 4.0 relicensing + NOTICE
-(`396dceb`) · CoC + CONTRIBUTING + structured issue templates
-(`2613022`) · SECURITY policy (`14b25fb`).
+### Where we are
+Solidly in "feature-complete alpha." Core terminal, multi-session,
+AI (Claude + local Gemma), settings panel, completion, history
+overlay, theming, native menu, CI + release pipeline, and a
+substantial security posture (phase-8 through phase-8.6) all shipped.
+Tests green, clippy green, cargo-audit green.
 
-### Remaining
-- 🔲 **Global search** (`⌘⇧F`). Search across command history + session
-  buffers. Reuse history-overlay component pattern.
-- 🔲 **Session rename persistence.** Renames work in-memory but die on
-  restart. Small — extend settings store.
-- 🔲 **`⌘⏎` agent conversation mode.** Saved-for-last per user note.
-  Streaming chat panel that suggests + (with approval) executes
-  commands. Significant UI surface.
+**Not beta yet.** Blockers — see roadmap below.
 
-### After Phase 7
-Phase 6 — VS Code extension. Shared core TypeScript modules in a
-Webview panel; node-pty instead of portable-pty; same Claude CLI
-subprocess approach.
+### Phase 7 tail (folded into Phase 9 below)
+- 🔲 **Global search** (`⌘⇧F`). Search across command history +
+  session buffers. Reuse history-overlay component pattern.
+- 🔲 **Session rename persistence.** Renames work in-memory but die
+  on restart. Small — extend `SettingsStore` schema with a
+  `sessions: Vec<PersistedSession>` field, save on rename, restore
+  on boot.
+- 🔲 **`⌘⏎` agent conversation mode.** Streaming chat panel that
+  proposes + (with approval) executes commands. Big UX surface —
+  explicitly deferred to v1.1 in the current plan, not a beta blocker.
+
+### Outstanding maintenance tasks
+- 🔲 **Refresh the command specs in `bundle.json`.** Seed content is
+  from Fig SHA `aef52ac` (~Apr 2025); Fig was sunset Sep 2024 so
+  some specs are stale (newer `docker compose` flags, recent `kubectl`
+  API additions, etc.). Plan: hand-edit the top ~20 commands that
+  matter (git, docker, kubectl, npm, cargo, aws, gh, brew, ssh,
+  python, node, pnpm, rg, fd, bat, jq, curl, tmux, vim, ssh). Rest
+  can stay on the Fig-era import until someone asks. Optional: split
+  bundle.json into per-command sidecar files (`git.json`,
+  `docker.json`, …) so diffs are readable. Not urgent.
+- 🔲 **AI-originated block marker in xterm** — Wave 3 visual polish
+  deferred. Paint a distinct pill color on the block-start when the
+  command came from an AI "Run" button, so the user can visually
+  distinguish AI-originated blocks from their own typing in the
+  scrollback. Aesthetic, not security-critical.
+
+### Roadmap to beta
+
+**Phase 9 — close the alpha gaps (~1 week of focused work):**
+- Session rename persistence (1-2 hrs)
+- Global search `⌘⇧F` (half day)
+- Written decision: "VS Code extension is v1.x, not v1.0." Put in
+  CONTRIBUTING.md or ROADMAP.md so contributors don't start on it
+  expecting it to land soon.
+- Explicit defer of `⌘⏎` agent mode to v1.1 (also documented).
+
+**Phase 10 — distribution polish (~2 days):**
+- Ad-hoc codesign (`codesign --force --deep --sign - ArcTerm.app`)
+  so Gatekeeper's complaint is less hostile than fully-unsigned.
+  Does not replace notarization (which is parked per owner's call —
+  see "Signing & notarization decision" below) but reduces friction
+  for beta users.
+- README: prominent "how to install" section with `xattr -dr` path
+  clearly documented.
+- Homebrew tap (`homebrew-arcterm` repo) so `brew install --cask
+  arcterm` works. ~30 min of work; dramatically lowers install
+  friction.
+- GitHub release notes template for consistent changelogs per tag.
+
+**Phase 11 — public exposure + feedback loop (~3-4 weeks elapsed,
+mostly not coding time):**
+- Small curated beta tester group; announce on HN / r/commandline /
+  an AI-tools community.
+- GitHub Discussions enabled; issue labels (`bug`, `enhancement`,
+  `question`, `security`).
+- 2-week bug-fixing sprints where the priority is "fix what beta
+  users reported" — no new features during this window.
+- **Explicitly no telemetry.** The terminal audience is hostile to
+  phone-home behavior. `/arcterm-audit` + user-submitted bug reports
+  are the entire feedback loop.
+
+**Ship criteria for calling `v0.2.0-beta.1`:**
+- ✓ Session rename persists across restart
+- ✓ Global search works
+- ✓ Install via `brew install --cask arcterm` (or equivalently
+  low-friction path)
+- ✓ ≥ 10 external testers have used it for a week without a P0 bug
+- ✓ Explicit written scope: what's v1.0, what's v1.1+
+- ✓ CI + release pipeline proven green for 3+ tagged releases
+
+### Signing & notarization decision
+Owner's call (Vatsal): **parked indefinitely** while the project
+stays free + solo-maintained. $99/yr Apple Developer Program isn't
+justified for a free project with no revenue. Distribution strategy
+is unsigned `.dmg` + documented `xattr -dr com.apple.quarantine`
+workaround + eventual Homebrew tap. Revisit IF the project gains a
+sponsor, a company, or a revenue stream. Until then: this is fine,
+every open-source Mac project in the world does the same thing.
+
+### Deferred explicitly (not beta blockers)
+- **VS Code extension (Phase 6)** → v1.x feature
+- **`⌘⏎` agent conversation mode** → v1.1 feature
+- **Notarized distribution** → when there's a funding model
+- **Regen-from-source CI for bundle.json** → Fig is dead; not useful
+- **Linux / Windows ports** → macOS-only alpha was intentional;
+  reopen if real demand surfaces post-beta
+
+### After beta
+Phase 6 (VS Code extension) — shared TypeScript core in a webview
+panel, `node-pty` instead of `portable-pty`, same Claude CLI
+subprocess approach. Meaningful rewrite for another environment,
+best tackled as its own milestone after the desktop v1.0 is stable.
 
 ---
 
@@ -526,8 +616,10 @@ When you start a new session, do this order:
 3. `git tag -l` — confirm the last phase tag; any new phase planning
    probably starts here.
 4. Skim this file.
-5. Check the **Remaining** list under "Phase 7 status" — that's your
-   immediate backlog.
+5. Check the **Roadmap to beta** section (Phase 9 specifically) — that's
+   the current active backlog. Phase 7 tail items are folded in.
+   **Outstanding maintenance tasks** above it (refresh specs, AI-block
+   marker) are lower priority but valid pickups.
 6. For any file the user mentions, start reading from the top — the
    module-level `//!` doc comment tells you what it owns and why.
 
