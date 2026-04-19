@@ -51,6 +51,17 @@ pub fn run() {
         );
     }
 
+    // Wave 4: normalize GGUF file permissions to 0600. Fresh downloads
+    // already get 0600 at atomic-rename time (Wave 2), but files
+    // installed earlier kept umask-default perms. Sweeps once per boot;
+    // no-op on files already at 0600 so cheap to run unconditionally.
+    let (perms_normalized, perms_total) = models::normalize_model_perms();
+    if perms_normalized > 0 {
+        log::info!(
+            "normalized perms on {perms_normalized}/{perms_total} model file(s) to 0600"
+        );
+    }
+
     // History is optional in the same sense — if SQLite can't open we log
     // and continue without autosuggest/overlay features.
     let history = match HistoryStore::open() {

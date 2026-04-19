@@ -457,3 +457,69 @@ pub fn cleanup_stranded_parts() -> (usize, u64) {
     }
     (removed, bytes)
 }
+
+/// SECURITY FIX: boot-time sweep to normalize GGUF file permissions to
+/// 0600.
+///
+/// Wave 2 chmods fresh downloads to 0600 after atomic-rename, but any
+/// file installed before Wave 2 kept its umask-default (typically
+/// 0644, observed in the wild: `-rw-r--r--`). The dir itself is 0700
+/// so other local users can't read these files regardless, but 0600
+/// is the documented policy and inconsistency is future-drift risk
+/// — if the dir perms ever slip (e.g. after a restore from a backup
+/// that doesn't preserve modes), the file perms become the only
+/// protection against same-uid-but-different-process readers.
+///
+/// Cheap: one `read_dir` + a `set_permissions` per `.gguf`. Idempotent.
+/// Returns (normalized, total_scanned) for a log summary.
+#[cfg(unix)]
+pub fn normalize_model_perms() -> (usize, usize) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return (0, 0);
+    };
+    let dir = std::path::PathBuf::from(home).join(".arcterm/models");
+    let read = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+    let mut normalized = 0usize;
+    let mut total = 0usize;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s != "gguf")
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        total += 1;
+        let Ok(meta) = entry.metadata() else { continue };
+        let current_mode = meta.permissions().mode() & 0o777;
+        if current_mode == 0o600 {
+            continue;
+        }
+        if std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .is_ok()
+        {
+            normalized += 1;
+            log::info!(
+                "normalized model perms: {} ({:o} -> 600)",
+                path.display(),
+                current_mode
+            );
+        }
+    }
+    (normalized, total)
+}
+
+#[cfg(not(unix))]
+pub fn normalize_model_perms() -> (usize, usize) {
+    (0, 0)
+}

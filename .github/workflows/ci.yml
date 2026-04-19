@@ -106,20 +106,29 @@ jobs:
       # so a newly-published advisory against one of our deps (or a
       # transitive dep) surfaces on the next push instead of lurking.
       #
-      # Ignored advisories — every entry has been triaged:
+      # Ignored advisories — every entry has been triaged.
+      #
+      # Triage cadence: review this entire list on every tauri-v2 minor
+      # bump (e.g. 2.10 -> 2.11). Most entries are tauri-transitive and
+      # naturally resolve when tauri upgrades its own deps. A new
+      # advisory against a crate NOT listed here will fail CI, which is
+      # what we want.
+      #
+      # Last reviewed: 2026-04-19 against tauri 2.10.3 + llama-cpp-2 0.1.
+      #
       #   * GTK3 / glib (RUSTSEC-2024-0411..0420, 0429): Linux-only tauri
       #     backend deps. ArcTerm is macOS-only; unreachable from the
       #     shipped binary. Drop once tauri migrates off gtk-rs 0.18.
+      #     [Expected clear: tauri v3 Linux backend migration.]
       #   * Unmaintained transitive build deps (RUSTSEC-2017-0008
       #     serial, 2024-0370 proc-macro-error, 2025-0057 fxhash,
-      #     2025-0075/0080/0081/0098/0100 unic-*): no runtime impact.
+      #     2025-0075/0080/0081/0098/0100 unic-*): build-time only; no
+      #     runtime impact. [Expected clear: downstream tauri-utils
+      #     moves off html5ever/kuchikiki.]
       #   * RUSTSEC-2026-0097 (rand): unsound only when used with a
       #     custom logger; pulled in at BUILD TIME via tauri-utils ->
       #     kuchikiki -> selectors -> phf_codegen -> rand. Not in the
       #     shipped binary.
-      #
-      # Revisit this list on every tauri bump. A new advisory against any
-      # crate not listed here will fail CI, which is what we want.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Cargo audit

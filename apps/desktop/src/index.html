@@ -3,6 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      SECURITY: CSP applies in BOTH dev and production.
+        - Production: tauri.conf.json's `app.security.csp` sends this
+          policy as an HTTP Content-Security-Policy header on every
+          response served by the custom protocol handler.
+        - Dev: vite serves the bundle from http://localhost:1420 and
+          does NOT set the response header, so only this meta tag
+          enforces. Both mechanisms active in prod; meta tag is the
+          single source of truth in dev.
+      Keep the two in sync — any change here MUST also be made in
+      tauri.conf.json. `connect-src 'self'` allows the ws://localhost:1420
+      Vite HMR socket (same-origin) in dev and the custom protocol in
+      prod; `ipc:` and `http://ipc.localhost` are Tauri's IPC channels.
+    -->
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost" />
     <title>ArcTerm</title>
