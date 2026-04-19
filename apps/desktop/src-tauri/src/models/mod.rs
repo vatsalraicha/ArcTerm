@@ -60,14 +60,16 @@ impl ModelSpec {
     }
 }
 
-/// The registry. Phase 5b ships one row; add more here as we certify them.
-/// These entries are what the frontend's `/arcterm-download` slash command
-/// autocompletes against.
+/// The registry. Phase 5b shipped one row; we now ship five Gemma 4
+/// variants. These entries are what the frontend's `/arcterm-download`
+/// slash command autocompletes against.
 ///
-/// NOTE on sha256: the hash below is a placeholder. Real hash gets pinned
-/// when we ship the first release; meanwhile `downloader::verify` treats
-/// an empty string as "skip verification". Leaving it empty for now is
-/// safer than hardcoding a wrong hash that would break downloads.
+/// NOTE on sha256: every entry MUST ship with a real 64-hex-char SHA256
+/// of the file's contents. The downloader refuses to run against an
+/// empty hash (see `downloader::download_inner`). To refresh these after
+/// an upstream re-quantization, HEAD the `resolve/main/<filename>` URL
+/// and copy the `x-linked-etag` value (HuggingFace's documented file
+/// SHA256, also exposed as `lfs.sha256` in `/api/models/<repo>/tree/main`).
 // NOTE: bartowski's repo names its files with a `google_` prefix (mirroring
 // the original upstream model id). Dropping the prefix produces 404s.
 // If we add another publisher's quants later, their naming convention may
@@ -83,8 +85,8 @@ pub const REGISTRY: &[ModelSpec] = &[
         display_name: "Gemma 4 E2B (Q4_K_M)",
         url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/google_gemma-4-E2B-it-Q4_K_M.gguf",
         filename: "google_gemma-4-E2B-it-Q4_K_M.gguf",
-        sha256: "",
-        size_bytes: 3_460_000_000,
+        sha256: "cded614c9b24be92e5a868d2ba38fb24e15dfea34fc650193c475a6debc233a7",
+        size_bytes: 3_462_677_760,
         parameters: "2.3B active / 5.1B total",
         quantization: "Q4_K_M",
         license: "Apache-2.0",
@@ -94,8 +96,8 @@ pub const REGISTRY: &[ModelSpec] = &[
         display_name: "Gemma 4 E2B (IQ2_M, tight)",
         url: "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/google_gemma-4-E2B-it-IQ2_M.gguf",
         filename: "google_gemma-4-E2B-it-IQ2_M.gguf",
-        sha256: "",
-        size_bytes: 2_620_000_000,
+        sha256: "17e869ac54d0e59faa884d5319fc55ad84cd866f50f0b3073fbb25accc875a23",
+        size_bytes: 2_620_198_144,
         parameters: "2.3B active / 5.1B total",
         quantization: "IQ2_M",
         license: "Apache-2.0",
@@ -112,8 +114,8 @@ pub const REGISTRY: &[ModelSpec] = &[
         display_name: "Gemma 4 E4B (Q4_K_M)",
         url: "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/google_gemma-4-E4B-it-Q4_K_M.gguf",
         filename: "google_gemma-4-E4B-it-Q4_K_M.gguf",
-        sha256: "",
-        size_bytes: 5_410_000_000,
+        sha256: "b937a48e96379116137c50acbe39fd1b46eb101d2df4e560f47f5e2171b6451e",
+        size_bytes: 5_405_167_904,
         parameters: "4B active / 7.5B total",
         quantization: "Q4_K_M",
         license: "Apache-2.0",
@@ -123,8 +125,8 @@ pub const REGISTRY: &[ModelSpec] = &[
         display_name: "Gemma 4 E4B (IQ2_M, tight)",
         url: "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/google_gemma-4-E4B-it-IQ2_M.gguf",
         filename: "google_gemma-4-E4B-it-IQ2_M.gguf",
-        sha256: "",
-        size_bytes: 3_960_000_000,
+        sha256: "68ac85596781c6ae7b64fd7febdcddbae51c74de15396af6803e2fcfa5916bb9",
+        size_bytes: 3_959_906_592,
         parameters: "4B active / 7.5B total",
         quantization: "IQ2_M",
         license: "Apache-2.0",
@@ -134,13 +136,57 @@ pub const REGISTRY: &[ModelSpec] = &[
         display_name: "Gemma 4 E4B (Q8_0, high quality)",
         url: "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/google_gemma-4-E4B-it-Q8_0.gguf",
         filename: "google_gemma-4-E4B-it-Q8_0.gguf",
-        sha256: "",
-        size_bytes: 8_030_000_000,
+        sha256: "9c536ba17e55f3cf4d45aaa985bea7637f7b9034240b1377aca88d873aa6cb5c",
+        size_bytes: 8_031_240_480,
         parameters: "4B active / 7.5B total",
         quantization: "Q8_0",
         license: "Apache-2.0",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every registry entry must ship a well-formed SHA256. The downloader
+    /// rejects empty hashes at runtime; this test catches a missing hash at
+    /// build time so a future `/arcterm-download <new-model>` can never
+    /// regress integrity verification because someone forgot to paste the
+    /// hash in.
+    #[test]
+    fn every_registry_entry_has_a_sha256() {
+        for spec in REGISTRY {
+            assert_eq!(
+                spec.sha256.len(),
+                64,
+                "model '{}' sha256 must be 64 hex chars (HuggingFace x-linked-etag). \
+                 Run `curl -sI <url> | grep x-linked-etag` to fetch it.",
+                spec.id
+            );
+            assert!(
+                spec.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+                "model '{}' sha256 contains non-hex character(s)",
+                spec.id
+            );
+        }
+    }
+
+    /// IDs are used as the keys in settings.ai.localModel and in the
+    /// `/arcterm-download <id>` slash command. Duplicates would silently
+    /// shadow one another — catch them early.
+    #[test]
+    fn registry_ids_are_unique() {
+        let mut seen: Vec<&str> = Vec::new();
+        for spec in REGISTRY {
+            assert!(
+                !seen.contains(&spec.id),
+                "duplicate model id in REGISTRY: '{}'",
+                spec.id
+            );
+            seen.push(spec.id);
+        }
+    }
+}
 
 /// Lookup a spec by id. Returns None for unknown ids; callers report a
 /// friendly error.

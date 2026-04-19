@@ -122,6 +122,28 @@ async fn download_inner(
         ));
     }
 
+    // SECURITY FIX: refuse to download any model whose registry entry is
+    // missing a SHA256. Previously an empty `sha256` silently disabled
+    // verify() — a user could load an unverified multi-GB GGUF into the
+    // inference engine just because someone forgot to paste the hash. The
+    // `every_registry_entry_has_a_sha256` unit test catches missing hashes
+    // at build time; this is the runtime backstop in case a future remote
+    // registry feeds us an entry we didn't compile in.
+    if spec.sha256.is_empty() {
+        return Err(format!(
+            "refusing to download {}: no SHA256 pinned for model '{}'. \
+             Fetch from `curl -sI <url> | grep x-linked-etag` and add to \
+             the ModelSpec registry before retrying.",
+            spec.url, spec.id
+        ));
+    }
+    if spec.sha256.len() != 64 || !spec.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "refusing to download {}: malformed SHA256 '{}' (must be 64 hex chars)",
+            spec.url, spec.sha256
+        ));
+    }
+
     let local_path = spec
         .local_path()
         .ok_or_else(|| "HOME not set".to_string())?;
@@ -287,19 +309,20 @@ async fn download_inner(
         .map_err(|e| format!("flush {}: {e}", part_path.display()))?;
     drop(file);
 
-    // SHA-256 verify (only if we have a pinned hash for this model).
-    if !spec.sha256.is_empty() {
-        let digest = hex::encode(hasher.finalize());
-        if !digest.eq_ignore_ascii_case(spec.sha256) {
-            // Keep the .part around for debugging instead of cleaning up —
-            // the user can inspect it if they really want to.
-            return Err(format!(
-                "SHA-256 mismatch: expected {}, got {}. File preserved at {}",
-                spec.sha256,
-                digest,
-                part_path.display()
-            ));
-        }
+    // SHA-256 verify. The empty-hash escape hatch is gone — download_inner
+    // refuses entry above if `spec.sha256` is missing or malformed, so by
+    // the time we reach this point we are guaranteed a 64-hex-char hash
+    // to compare against.
+    let digest = hex::encode(hasher.finalize());
+    if !digest.eq_ignore_ascii_case(spec.sha256) {
+        // Keep the .part around for debugging instead of cleaning up —
+        // the user can inspect it if they really want to.
+        return Err(format!(
+            "SHA-256 mismatch: expected {}, got {}. File preserved at {}",
+            spec.sha256,
+            digest,
+            part_path.display()
+        ));
     }
 
     // Atomic rename into place. At this point the file is fully written,
