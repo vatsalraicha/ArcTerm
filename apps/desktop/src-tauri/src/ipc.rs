@@ -516,12 +516,19 @@ pub fn fs_complete(
     cursor_pos: usize,
     cwd: Option<String>,
 ) -> Result<CompletionResult, String> {
-    // cwd is None if the shell hasn't reported OSC 7 yet. Fall back to the
-    // process cwd — better than failing outright; the user may still get
-    // useful completions relative to wherever ArcTerm was launched.
-    let cwd_path = cwd
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| "no cwd available".to_string())?;
+    // Previous behavior fell back to process current_dir() when the shell
+    // hadn't reported OSC 7 yet — that could leak the launch directory
+    // (e.g. "/Applications") to the renderer for a few frames on boot.
+    // Return an empty result instead; the UI already handles "no
+    // completions" gracefully, and the first OSC 7 will land a few ms
+    // later and unlock real completions.
+    let cwd_path = match cwd.map(PathBuf::from) {
+        Some(p) if p.is_absolute() => p,
+        _ => return Ok(CompletionResult {
+            token_start: 0,
+            token_end: cursor_pos,
+            completions: vec![],
+        }),
+    };
     Ok(fs_complete_impl(&text, cursor_pos, &cwd_path))
 }

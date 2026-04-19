@@ -101,3 +101,48 @@ jobs:
       - name: Cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test
+
+      # Dependency advisory scan. Fails CI on any unhandled RustSec entry
+      # so a newly-published advisory against one of our deps (or a
+      # transitive dep) surfaces on the next push instead of lurking.
+      #
+      # Ignored advisories — every entry has been triaged:
+      #   * GTK3 / glib (RUSTSEC-2024-0411..0420, 0429): Linux-only tauri
+      #     backend deps. ArcTerm is macOS-only; unreachable from the
+      #     shipped binary. Drop once tauri migrates off gtk-rs 0.18.
+      #   * Unmaintained transitive build deps (RUSTSEC-2017-0008
+      #     serial, 2024-0370 proc-macro-error, 2025-0057 fxhash,
+      #     2025-0075/0080/0081/0098/0100 unic-*): no runtime impact.
+      #   * RUSTSEC-2026-0097 (rand): unsound only when used with a
+      #     custom logger; pulled in at BUILD TIME via tauri-utils ->
+      #     kuchikiki -> selectors -> phf_codegen -> rand. Not in the
+      #     shipped binary.
+      #
+      # Revisit this list on every tauri bump. A new advisory against any
+      # crate not listed here will fail CI, which is what we want.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Cargo audit
+        working-directory: apps/desktop/src-tauri
+        run: >-
+          cargo audit --deny warnings
+          --ignore RUSTSEC-2017-0008
+          --ignore RUSTSEC-2024-0370
+          --ignore RUSTSEC-2024-0411
+          --ignore RUSTSEC-2024-0412
+          --ignore RUSTSEC-2024-0413
+          --ignore RUSTSEC-2024-0414
+          --ignore RUSTSEC-2024-0415
+          --ignore RUSTSEC-2024-0416
+          --ignore RUSTSEC-2024-0417
+          --ignore RUSTSEC-2024-0418
+          --ignore RUSTSEC-2024-0419
+          --ignore RUSTSEC-2024-0420
+          --ignore RUSTSEC-2024-0429
+          --ignore RUSTSEC-2025-0057
+          --ignore RUSTSEC-2025-0075
+          --ignore RUSTSEC-2025-0080
+          --ignore RUSTSEC-2025-0081
+          --ignore RUSTSEC-2025-0098
+          --ignore RUSTSEC-2025-0100
+          --ignore RUSTSEC-2026-0097

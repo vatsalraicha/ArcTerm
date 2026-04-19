@@ -252,7 +252,11 @@ fn list_dir(dir: &Path, base: &str) -> std::io::Result<Vec<Completion>> {
             continue;
         }
 
-        let meta = match entry.metadata() {
+        // Use symlink_metadata (i.e. lstat) instead of metadata (stat) so a
+        // symlink pointing at a directory registers as a file, not as a dir.
+        // Prevents silent traversal through symlinked loops when the user
+        // tab-completes into a directory whose children are symlink cycles.
+        let meta = match entry.path().symlink_metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
