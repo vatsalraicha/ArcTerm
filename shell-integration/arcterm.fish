@@ -19,6 +19,19 @@ end
 function fish_right_prompt
 end
 
+# --- 1b. OSC nonce capture (SECURITY) --------------------------------------
+# Fish's startup differs from bash/zsh: config.fish always runs first, then
+# our -C hooks. That means the $ARCTERM_OSC_NONCE env var is visible to
+# anything config.fish spawns — a minor window narrower than bash/zsh's
+# unset-before-rc approach. Documented trade-off; the majority target is
+# zsh on macOS where the earlier unset works cleanly.
+#
+# Capture into a global (non-exported) variable and scrub the env var so
+# downstream commands (plugins, functions defined after this file sources)
+# don't leak the nonce to subprocesses.
+set -g __arcterm_osc_nonce $ARCTERM_OSC_NONCE
+set -e ARCTERM_OSC_NONCE
+
 # --- 2. Emit helpers -------------------------------------------------------
 function _arcterm_emit_cwd
     # fish has built-in %-encoding via `string escape --style=url` but
@@ -27,18 +40,20 @@ function _arcterm_emit_cwd
     printf '\e]7;file://%s%s\a' (hostname) $path
 end
 
+# SECURITY: OSC 133/1337 emissions stamped with per-session nonce. See
+# arcterm.zsh for full threat model + wire format.
 function _arcterm_mark_command_executed
-    printf '\e]133;C\a\e[0m'
+    printf '\e]133;C;%s\a\e[0m' $__arcterm_osc_nonce
 end
 
 function _arcterm_emit_block_end
-    printf '\e[0m\e]133;D;%d\a' $argv[1]
+    printf '\e[0m\e]133;D;%d;%s\a' $argv[1] $__arcterm_osc_nonce
 end
 
 function _arcterm_emit_branch
     set -l branch ""
     set branch (git symbolic-ref --quiet --short HEAD 2>/dev/null; or echo "")
-    printf '\e]1337;ArcTermBranch=%s\a' $branch
+    printf '\e]1337;ArcTermBranch=%s;%s\a' $branch $__arcterm_osc_nonce
 end
 
 # --- 3. Event hooks --------------------------------------------------------

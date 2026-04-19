@@ -161,6 +161,10 @@ export async function setupTerminal(
   // --- OSC 7 handler: shell reports cwd ---------------------------------
   // Format the arcterm.zsh script emits: `file://host/absolute/path`.
   // xterm's registerOscHandler returns true to mark the sequence consumed.
+  // NOTE: OSC 7 is deliberately NOT nonce-gated. It's a cross-terminal
+  // standard and tools like tmux / remote shells emit it legitimately —
+  // requiring our nonce would break their cwd updates. parseOsc7 already
+  // validates the payload (abs path, no control chars, length-capped).
   let currentCwd: string | null = null;
   const cwdListeners = new Set<(cwd: string) => void>();
   term.parser.registerOscHandler(7, (uri: string) => {
@@ -172,37 +176,63 @@ export async function setupTerminal(
     return true;
   });
 
+  // The OSC nonce lives here, closed over by the 133 / 1337 handlers
+  // registered below. Populated after pty_spawn completes — during the
+  // window between term.open() and pty_spawn resolving, no OSCs can
+  // arrive (nothing is writing to the PTY yet), but we still default-
+  // reject to be safe.
+  let oscNonce: string | null = null;
+
   // --- OSC 133 handler: block boundary markers -------------------------
-  // arcterm.zsh only emits ";D;<exit_code>" — ArcTerm decides block-start
-  // itself when the user presses Enter. Parameters are split by ';'.
+  // Wire format emitted by our shell integration:
+  //   OSC 133;C;<nonce>         (preexec — command about to run)
+  //   OSC 133;D;<exit>;<nonce>  (precmd — command finished)
+  // SECURITY: we ONLY act on sequences whose trailing nonce matches the
+  // per-session nonce exported to the shell via $ARCTERM_OSC_NONCE. A
+  // rogue `cat file-containing-\e]133;D;0\a` would otherwise corrupt
+  // the history DB by writing a fake exit code against whatever
+  // command was actually running. Silent-drop on mismatch so a noisy
+  // terminal session doesn't spam the user with warnings.
   const commandEndListeners = new Set<(exitCode: number) => void>();
   term.parser.registerOscHandler(133, (payload: string) => {
     const parts = payload.split(";");
     if (parts[0] === "D") {
-      // Exit code defaults to 0 if absent; zsh always sends one though.
+      // Format: "D;<exit>;<nonce>"  → parts = ["D","<exit>","<nonce>"]
+      const nonce = parts[2] ?? "";
+      if (!oscNonce || nonce !== oscNonce) return true; // drop
       const code = Number.parseInt(parts[1] ?? "0", 10);
       if (!Number.isNaN(code)) {
         for (const cb of commandEndListeners) cb(code);
       }
     }
+    // OSC 133;C is currently not consumed by the frontend (we draw our
+    // own block-start on editor-submit), but we still return true to
+    // mark it handled so xterm doesn't render the raw bytes.
     return true;
   });
 
   // --- OSC 1337 handler: ArcTerm custom key/value ----------------------
-  // Format emitted by arcterm.zsh: `ArcTermBranch=<name>`. iTerm uses
-  // OSC 1337 broadly for its own keys; we namespace with the `ArcTerm`
-  // prefix so we can add more keys later without collision.
+  // Wire format: `ArcTermBranch=<name>;<nonce>`. iTerm uses OSC 1337 broadly
+  // for its own keys; we namespace with `ArcTerm` prefix so we can add more
+  // keys later without collision. Git ref names disallow `;` (see
+  // git-check-ref-format) so the last-semicolon split is unambiguous.
   const branchListeners = new Set<(branch: string) => void>();
   term.parser.registerOscHandler(1337, (payload: string) => {
     const eq = payload.indexOf("=");
     if (eq === -1) return false; // not key/value; let other handlers try
     const key = payload.slice(0, eq);
-    const value = payload.slice(eq + 1);
+    const rhs = payload.slice(eq + 1);
     if (key === "ArcTermBranch") {
-      // SECURITY FIX: any program can emit OSC 1337 to spoof a branch.
-      // Strip control chars and cap length so a malicious value can't
-      // inject escapes or bloat the prompt bar. Git ref-name grammar
-      // tops out well under 256 chars in practice.
+      // Split off the trailing `;<nonce>`. Everything up to the last `;`
+      // is the value.
+      const lastSemi = rhs.lastIndexOf(";");
+      const value = lastSemi === -1 ? rhs : rhs.slice(0, lastSemi);
+      const nonce = lastSemi === -1 ? "" : rhs.slice(lastSemi + 1);
+      // SECURITY: nonce validation. Without it, any program printing
+      // `\e]1337;ArcTermBranch=anything\a` could lie about the branch.
+      if (!oscNonce || nonce !== oscNonce) return true;
+      // Even with a valid nonce, still strip control chars + cap length
+      // as defense-in-depth against a bug in the shell hook.
       // eslint-disable-next-line no-control-regex
       const clean = value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 256);
       for (const cb of branchListeners) cb(clean);
@@ -213,10 +243,21 @@ export async function setupTerminal(
     return false;
   });
 
-  const ptyId = await invoke<string>("pty_spawn", {
+  // SECURITY: pty_spawn now returns both the session id AND a
+  // cryptographically-random per-session OSC nonce. The shell-integration
+  // scripts read this nonce from $ARCTERM_OSC_NONCE at startup (then
+  // unset the env var so children don't inherit it) and append it to every
+  // OSC 133 / 1337 emission. We verify incoming OSCs against this nonce
+  // before acting on them so a `cat file-containing-crafted-bytes` or an
+  // ssh'd remote server can't spoof command-finished / branch-name
+  // messages into the terminal. OSC 7 (cwd) stays plain so cross-terminal
+  // tools like tmux continue to update our prompt bar.
+  const spawn = await invoke<{ id: string; oscNonce: string }>("pty_spawn", {
     cols: term.cols,
     rows: term.rows,
   });
+  const ptyId = spawn.id;
+  oscNonce = spawn.oscNonce;
 
   // PTY -> terminal. Decode base64 bytes and feed raw to xterm so escape
   // sequences (colors, cursor moves, DCS for blocks later) are preserved.

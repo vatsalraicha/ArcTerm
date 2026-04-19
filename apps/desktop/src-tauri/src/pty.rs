@@ -58,6 +58,16 @@ struct ExitPayload {
     code: Option<i32>,
 }
 
+/// Return shape of `PtyManager::spawn`. The frontend needs the PTY id
+/// (for subsequent IPC calls) and the session's OSC nonce (to validate
+/// inbound shell-integration sequences against).
+#[derive(Clone, Serialize)]
+pub struct SpawnResult {
+    pub id: String,
+    #[serde(rename = "oscNonce")]
+    pub osc_nonce: String,
+}
+
 pub struct PtyManager {
     // Arc + Mutex so reader threads can hold a reference while IPC handlers
     // mutate the map. Inner Arc<PtyEntry> lets a write/resize call grab a
@@ -77,8 +87,15 @@ impl PtyManager {
         }
     }
 
-    /// Spawn a shell PTY and start its reader thread. Returns the new id.
-    pub fn spawn(&self, app: AppHandle, cols: u16, rows: u16) -> Result<String, String> {
+    /// Spawn a shell PTY and start its reader thread. Returns the new id
+    /// plus the per-session OSC nonce so the frontend can validate inbound
+    /// shell-integration sequences against it.
+    pub fn spawn(
+        &self,
+        app: AppHandle,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SpawnResult, String> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -107,6 +124,15 @@ impl PtyManager {
         // can use. xterm-256color is the broadest safe choice for xterm.js.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+
+        // SECURITY: per-session OSC nonce. See PtyEntry.osc_nonce for the
+        // threat model. Uuid::new_v4 is cryptographically random via
+        // getrandom; the hyphen-less hex form is 32 chars and fits cleanly
+        // into an OSC parameter without needing escaping. The shell hooks
+        // read this env var into a shell-local variable and immediately
+        // `unset ARCTERM_OSC_NONCE` so it never leaks into child processes.
+        let osc_nonce = Uuid::new_v4().simple().to_string();
+        cmd.env("ARCTERM_OSC_NONCE", &osc_nonce);
 
         // Shell integration: the mechanism depends on the shell.
         //   - zsh:  set ZDOTDIR; our zdotdir/.zshrc chain-loads the user's
@@ -256,7 +282,7 @@ impl PtyManager {
             .map_err(|e| format!("spawn reader thread failed: {e}"))?;
 
         log::info!("spawned pty {id} shell={shell} cols={cols} rows={rows}");
-        Ok(id)
+        Ok(SpawnResult { id, osc_nonce })
     }
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {

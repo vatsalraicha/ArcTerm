@@ -29,7 +29,7 @@ pub fn pty_spawn(
     manager: State<'_, PtyManager>,
     cols: u16,
     rows: u16,
-) -> Result<String, String> {
+) -> Result<crate::pty::SpawnResult, String> {
     manager.spawn(app, cols, rows)
 }
 

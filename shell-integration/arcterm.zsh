@@ -60,13 +60,22 @@ _arcterm_emit_cwd() {
 #
 # The \e[0m prefix on ;D is belt + suspenders in case preexec was skipped
 # (e.g. the user pressed Ctrl+C between zle read and preexec firing).
+# SECURITY: OSC 133 emissions include the per-session nonce (captured in
+# .zshenv from $ARCTERM_OSC_NONCE before any user code runs). ArcTerm's
+# frontend only acts on OSC 133 sequences whose nonce matches the session's
+# stored value, so a rogue `cat file-containing-crafted-bytes` or remote
+# ssh server output can't spoof "command finished with exit 0" and
+# corrupt the history DB. Wire format (optional-nonce is semicolon-delimited
+# so older ArcTerm builds that ignore the trailing field still parse exit):
+#   \e]133;C;<nonce>\a   (preexec — command about to run)
+#   \e]133;D;<exit>;<nonce>\a  (precmd — command finished)
 _arcterm_mark_command_executed() {
-    printf '\e]133;C\a\e[0m'
+    printf '\e]133;C;%s\a\e[0m' "${__arcterm_osc_nonce-}"
 }
 
 _arcterm_emit_block_end() {
     local exit_code=$?
-    printf '\e[0m\e]133;D;%d\a' "${exit_code}"
+    printf '\e[0m\e]133;D;%d;%s\a' "${exit_code}" "${__arcterm_osc_nonce-}"
     return ${exit_code}
 }
 
@@ -80,7 +89,11 @@ _arcterm_emit_branch() {
     # empty string when HEAD is detached; stderr suppressed for the
     # "not a git repo" case.
     branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=""
-    printf '\e]1337;ArcTermBranch=%s\a' "${branch}"
+    # SECURITY: nonce-stamped so spoofed ArcTermBranch values from
+    # crafted program output are rejected by the frontend validator.
+    # Wire format: `ArcTermBranch=<name>;<nonce>` — git ref names can't
+    # contain `;` (see git-check-ref-format) so the split is unambiguous.
+    printf '\e]1337;ArcTermBranch=%s;%s\a' "${branch}" "${__arcterm_osc_nonce-}"
 }
 
 # --- 5. Register hooks -------------------------------------------------------

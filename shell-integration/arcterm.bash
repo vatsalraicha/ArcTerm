@@ -58,19 +58,23 @@ _arcterm_emit_cwd() {
     printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "${path}"
 }
 
+# SECURITY: see arcterm.zsh for the OSC nonce threat model + wire format.
+# The nonce is captured into $__arcterm_osc_nonce by the bash rcfile
+# (generated in shell_hooks.rs::bash_rcfile_contents) before user .bashrc
+# sources, and the env var is unset there so child processes don't see it.
 _arcterm_mark_command_executed() {
-    printf '\e]133;C\a\e[0m'
+    printf '\e]133;C;%s\a\e[0m' "${__arcterm_osc_nonce-}"
 }
 
 _arcterm_emit_block_end() {
     local exit_code="${1:-0}"
-    printf '\e[0m\e]133;D;%d\a' "${exit_code}"
+    printf '\e[0m\e]133;D;%d;%s\a' "${exit_code}" "${__arcterm_osc_nonce-}"
 }
 
 _arcterm_emit_branch() {
     local branch=""
     branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=""
-    printf '\e]1337;ArcTermBranch=%s\a' "${branch}"
+    printf '\e]1337;ArcTermBranch=%s;%s\a' "${branch}" "${__arcterm_osc_nonce-}"
 }
 
 # --- 3. Install hooks ------------------------------------------------------

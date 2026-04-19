@@ -45,6 +45,14 @@ fn bash_rcfile_contents() -> String {
 # prompt frameworks all run normally, then sources arcterm.bash last so
 # our prompt suppression + shell integration hooks win.
 
+# SECURITY: capture the per-session OSC nonce into a shell-local variable
+# and immediately unset the env var before user .bashrc runs, so child
+# processes spawned from user rc don't inherit it. arcterm.bash reads
+# $__arcterm_osc_nonce to stamp OSC 133/1337 emissions. `declare` without
+# `-x` keeps the variable unexported.
+declare __arcterm_osc_nonce="${ARCTERM_OSC_NONCE-}"
+unset ARCTERM_OSC_NONCE
+
 [[ -r "${HOME}/.bashrc" ]] && source "${HOME}/.bashrc"
 
 : "${ARCTERM_INTEGRATION_DIR:=${HOME}/.arcterm/shell-integration}"
