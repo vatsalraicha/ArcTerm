@@ -313,11 +313,17 @@ function shortenCwd(cwd: string): string {
 }
 
 function escapeHtml(s: string): string {
+    // SECURITY FIX (L-13): escape single-quote. Without it, this helper
+    // is unsafe in single-quoted attribute contexts (`title='…'`) — a
+    // future refactor that switches quoting styles silently regresses
+    // to XSS. Matches the standard "big five" entities recommended by
+    // OWASP's output-encoding cheat sheet.
     return s
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
 // --- Context menu (used by right-click on session rows) ----------------

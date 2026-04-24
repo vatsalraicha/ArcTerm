@@ -289,11 +289,19 @@ export class HistoryOverlay {
 }
 
 function shortenCwd(cwd: string): string {
+    // SECURITY FIX (L-15): strip ASCII control bytes and Unicode line
+    // separators from cwd values read out of the history DB before we
+    // render them. textContent makes XSS impossible but the characters
+    // still render as box-drawing / cursor-movement noise in the
+    // terminal-font rendering of the badge. Wave-1 history sanitation
+    // should catch these at write time; this is defense-in-depth.
+    // eslint-disable-next-line no-control-regex
+    const clean = cwd.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029\u202A-\u202E\u2066-\u2069]/g, "");
     const home = "/Users/"; // rough match; display-only, exact HOME not critical
-    if (cwd.length > 40) {
-        return "…" + cwd.slice(cwd.length - 40);
+    if (clean.length > 40) {
+        return "…" + clean.slice(clean.length - 40);
     }
-    return cwd.replace(new RegExp(`^${home}[^/]+`), "~");
+    return clean.replace(new RegExp(`^${home}[^/]+`), "~");
 }
 
 function badge(className: string, text: string): HTMLSpanElement {

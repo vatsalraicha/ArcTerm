@@ -142,9 +142,29 @@ pub fn install() -> Result<Paths, String> {
 }
 
 fn write_file(path: &Path, content: &str) -> Result<(), String> {
-    // Write atomically-ish: we don't bother with a temp-rename dance because
-    // a partial write here would only affect the next shell spawn, and we
-    // rewrite on every launch anyway.
+    // SECURITY FIX (M-7): an attacker (or a previous-install bug) that
+    // pre-plants `~/.arcterm/zdotdir/.zshrc` as a symlink to the user's
+    // real `~/.zshrc` would otherwise cause `fs::write` to follow and
+    // truncate the target — silently wiping the user's shell config
+    // on the next ArcTerm launch. Use `O_NOFOLLOW | O_CREAT | O_TRUNC`
+    // so a pre-existing symlink causes the open to fail (ELOOP) rather
+    // than silently victimize the link target.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
     fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
     // SECURITY FIX: shell scripts that run in every PTY must be owner-only.
     restrict_file(path);

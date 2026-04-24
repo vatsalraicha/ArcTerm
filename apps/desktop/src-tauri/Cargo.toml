@@ -16,7 +16,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
+# SECURITY (H-4): tauri-plugin-shell intentionally NOT a dependency.
+# See lib.rs near the `tauri::Builder::default()` for rationale.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -75,6 +76,14 @@ sha2 = "0.10"
 # (common with non-ASCII output) come out correctly. This is the same
 # decoder crate used in the llama-cpp-2 simple example.
 encoding_rs = "0.8"
+
+# Used for O_NOFOLLOW / O_CLOEXEC flags when opening paths under
+# ~/.arcterm/ that a same-uid attacker could have replaced with a
+# symlink between our metadata check and our open. Already a
+# transitive dep (via rustls + reqwest); we name it here to use it
+# directly from our own code.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 # Tauri v2 expects a `custom-protocol` feature flag for the production build.

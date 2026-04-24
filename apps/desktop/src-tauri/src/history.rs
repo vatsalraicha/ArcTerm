@@ -299,7 +299,27 @@ fn sanitize_command(s: &str) -> String {
             out.push(ch);
             continue;
         }
+        // ASCII controls (minus tab above) + DEL.
         if c < 0x20 || c == 0x7f {
+            continue;
+        }
+        // SECURITY (M-16): extend past the original ASCII-only filter.
+        // Unicode line separators, NEL, BOM, bidi overrides, and bidi
+        // isolates survive through to the history DB and re-enter
+        // future AI prompts as `recent_commands` context. A command
+        // stored as `echo hello\u202E then rm -rf /` displays with
+        // reversed order in terminal font and injects attacker-chosen
+        // text into every subsequent ⌘K in the same cwd.
+        if matches!(
+            c,
+            0x80..=0x9F |              // C1 controls (incl. NEL 0x85)
+            0x2028 | 0x2029 |          // LINE / PARAGRAPH SEPARATOR
+            0xFEFF |                   // BOM
+            0x200B..=0x200F |          // zero-widths + LRM/RLM
+            0x2060..=0x2064 |          // word joiner + invisible separators
+            0x202A..=0x202E |          // bidi override
+            0x2066..=0x2069            // bidi isolate
+        ) {
             continue;
         }
         out.push(ch);
