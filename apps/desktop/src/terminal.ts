@@ -27,6 +27,26 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import "@xterm/xterm/css/xterm.css";
 
+/**
+ * SECURITY (M-4): constant-time string equality for nonce comparison.
+ * JavaScript's `===` short-circuits at the first differing byte, so
+ * compare time is proportional to the attacker-controlled prefix
+ * length. A hostile subprocess that can emit OSCs and observe timing
+ * of our DOM-write side effects could in principle brute-force a
+ * byte-at-a-time. The UUIDv4 nonce is 122 bits so this is mostly
+ * theoretical, but constant-time compare is cheap defense-in-depth
+ * and is what every security guide recommends for session-token
+ * equality checks.
+ */
+function timingSafeEqualStr(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) {
+        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+    return diff === 0;
+}
+
 // Matches the Rust event name. Keep these two strings in sync.
 const PTY_DATA_EVENT = "pty://data";
 const PTY_EXIT_EVENT = "pty://exit";
@@ -200,21 +220,47 @@ export async function setupTerminal(
   // command was actually running. Silent-drop on mismatch so a noisy
   // terminal session doesn't spam the user with warnings.
   const commandEndListeners = new Set<(exitCode: number) => void>();
+  // SECURITY (M-3/M-4): deny-by-default. Every 133 subtype must carry a
+  // trailing nonce that matches the per-session $ARCTERM_OSC_NONCE via
+  // a constant-time compare. An unrecognized subtype or a missing /
+  // mismatched nonce returns true (consume + drop) so the raw bytes
+  // don't render but no listener fires.
   term.parser.registerOscHandler(133, (payload: string) => {
     const parts = payload.split(";");
-    if (parts[0] === "D") {
-      // Format: "D;<exit>;<nonce>"  → parts = ["D","<exit>","<nonce>"]
-      const nonce = parts[2] ?? "";
-      if (!oscNonce || nonce !== oscNonce) return true; // drop
-      const code = Number.parseInt(parts[1] ?? "0", 10);
-      if (!Number.isNaN(code)) {
-        for (const cb of commandEndListeners) cb(code);
+    const subtype = parts[0] ?? "";
+    // Every subtype we care about appends ;<nonce>. A/B/C/D sequences
+    // without a nonce are treated as forged (the shell hook always
+    // appends it). Explicit allowlist — future subtypes must be added
+    // here by the developer, default is drop.
+    switch (subtype) {
+      case "A":
+      case "B":
+      case "C": {
+        const nonce = parts[1] ?? "";
+        if (!oscNonce || !timingSafeEqualStr(nonce, oscNonce)) return true;
+        // No listener wired yet for A/B/C; drop cleanly.
+        return true;
       }
+      case "D": {
+        // Format: "D;<exit>;<nonce>"
+        const nonce = parts[2] ?? "";
+        if (!oscNonce || !timingSafeEqualStr(nonce, oscNonce)) return true;
+        // I-5: clamp exit code to a plausible range. POSIX exit codes
+        // are 0–255; signal-terminated shells use 128+N (max ~192).
+        // A few shells emit negative for killed-by-signal. Anything
+        // outside [-1024, 65535] is either a bug or an injection
+        // attempt; drop the event rather than store nonsense.
+        const code = Number.parseInt(parts[1] ?? "0", 10);
+        if (Number.isFinite(code) && code >= -1024 && code <= 65535) {
+          for (const cb of commandEndListeners) cb(code);
+        }
+        return true;
+      }
+      default:
+        // Unknown subtype: consume + drop. Never let a forged / novel
+        // sequence fall through to another handler or render.
+        return true;
     }
-    // OSC 133;C is currently not consumed by the frontend (we draw our
-    // own block-start on editor-submit), but we still return true to
-    // mark it handled so xterm doesn't render the raw bytes.
-    return true;
   });
 
   // --- OSC 52 handler: DROP all clipboard set/query attempts -----------
@@ -291,15 +337,17 @@ export async function setupTerminal(
     if (eq === -1) return false; // not key/value; let other handlers try
     const key = payload.slice(0, eq);
     const rhs = payload.slice(eq + 1);
+    // SECURITY (M-3): explicit per-key allowlist with constant-time nonce
+    // validation up-front. A default `return true` for "any ArcTerm*"
+    // key is a future footgun — a new key added later gets free nonce
+    // bypass unless the developer remembers to add validation.
     if (key === "ArcTermBranch") {
       // Split off the trailing `;<nonce>`. Everything up to the last `;`
       // is the value.
       const lastSemi = rhs.lastIndexOf(";");
       const value = lastSemi === -1 ? rhs : rhs.slice(0, lastSemi);
       const nonce = lastSemi === -1 ? "" : rhs.slice(lastSemi + 1);
-      // SECURITY: nonce validation. Without it, any program printing
-      // `\e]1337;ArcTermBranch=anything\a` could lie about the branch.
-      if (!oscNonce || nonce !== oscNonce) return true;
+      if (!oscNonce || !timingSafeEqualStr(nonce, oscNonce)) return true;
       // Even with a valid nonce, still strip control chars + cap length
       // as defense-in-depth against a bug in the shell hook.
       // eslint-disable-next-line no-control-regex
@@ -307,7 +355,9 @@ export async function setupTerminal(
       for (const cb of branchListeners) cb(clean);
       return true;
     }
-    // Unknown ArcTerm* keys: consume silently so they don't render as garbage.
+    // Unknown ArcTerm*-prefixed keys: consume+drop so garbage bytes
+    // don't render, but do NOT fire any listener. New keys MUST be
+    // added to this switch explicitly before they become active.
     if (key.startsWith("ArcTerm")) return true;
     return false;
   });
@@ -618,8 +668,14 @@ function parseOsc7(uri: string): string | null {
   // Require absolute path, no NUL bytes, no ANSI escapes, reasonable length.
   if (!decoded.startsWith("/")) return null;
   if (decoded.length > 4096) return null;
+  // SECURITY FIX (M-2): reject ALL ASCII control characters (0x00-0x1F
+  // and 0x7F) plus Unicode line separators in a cwd. The original set
+  // allowed TAB (0x09) and LF (0x0A), either of which an attacker-
+  // controlled directory name can use to inject fake prompt sections
+  // into the AI context. Directory names with embedded control chars
+  // are not legitimate; fall back to the previous cwd on rejection.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(decoded)) return null;
+  if (/[\x00-\x1f\x7f\u0085\u2028\u2029\u202A-\u202E\u2066-\u2069`]/.test(decoded)) return null;
   return decoded;
 }
 

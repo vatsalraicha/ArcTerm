@@ -109,6 +109,11 @@ impl AuditLog {
 /// ~µs per call on typical keystroke payloads.
 pub fn inspect_pty_write(data: &str) -> Option<String> {
     let bytes = data.as_bytes();
+    // Tiny payloads (single keystrokes) can't carry any of the patterns
+    // we flag; skip the allocation + scan.
+    if bytes.len() < 4 {
+        return None;
+    }
 
     // OSC 52 clipboard set. The input editor never emits these;
     // presence indicates either a bug or a renderer trying to
@@ -131,12 +136,21 @@ pub fn inspect_pty_write(data: &str) -> Option<String> {
         ));
     }
 
-    // Destructive-string substrings that shouldn't reach pty_write
-    // without going through Wave 3's AI-panel confirmation flow
-    // (which logs the `ai_ask` call separately). This is a log-only
-    // heuristic — false positives happen (legitimate `rm -rf
-    // node_modules`) and are fine: forensic noise, not user-facing.
-    let lower = data.to_ascii_lowercase();
+    // SECURITY (L-9): cap the lowercase-then-contains scan at 8 KiB.
+    // Known danger needles are all short; scanning (and allocating a
+    // clone of) a full 1 MiB pty_write on every keystroke is a CPU
+    // amplification vector. Forensic value of anything beyond the
+    // first 8 KiB is also low (the header/prefix is what a crafted
+    // exploit needs to land early). Legitimate multi-MB pastes pay a
+    // one-time 8 KiB lowercase conversion instead of the full buffer.
+    const SCAN_CAP: usize = 8 * 1024;
+    let slice_end = data
+        .char_indices()
+        .take_while(|(i, _)| *i < SCAN_CAP)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let lower = data[..slice_end].to_ascii_lowercase();
     // Substrings must be exact matches — we intentionally avoid pulling
     // the `regex` crate in just for the sniffer. Patterns like "| sh\r"
     // catch curl-pipe-to-shell as the user submits it (`\r` is the

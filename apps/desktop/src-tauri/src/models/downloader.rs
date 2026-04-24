@@ -150,16 +150,25 @@ async fn download_inner(
     let dir = local_path
         .parent()
         .ok_or_else(|| "model path has no parent".to_string())?;
+    // SECURITY FIX (L-3): create directory with explicit 0700 mode rather
+    // than relying on umask-default + post-hoc chmod. `create_dir_all`
+    // inherits the process umask (typically 022 → 0755) and leaves a
+    // race window between dir creation and `set_permissions`. Pass the
+    // mode directly to `mkdir(2)` via `DirBuilderExt::mode` to close it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder
+            .create(dir)
+            .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("create {}: {e}", dir.display()))?;
-    // SECURITY FIX: GGUFs we load into the inference engine must not be
-    // writable by other local users. Restrict dir to owner-only.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await;
-    }
 
     // .part sibling. Written during transfer, renamed on success.
     let part_path = local_path.with_extension(format!(
@@ -167,13 +176,35 @@ async fn download_inner(
         local_path.extension().and_then(|s| s.to_str()).unwrap_or("")
     ));
 
+    // SECURITY FIX (H-1): refuse to proceed if `.part` OR final path
+    // exists as a symlink. A same-uid attacker who plants either as a
+    // link to e.g. `~/.zshrc` / `~/.ssh/authorized_keys` could use the
+    // open-for-append path to corrupt that file with model bytes, or
+    // the truncating `File::create` fallback to zero it out. Detect &
+    // bail early; user cleans up manually.
+    for candidate in [&part_path, &local_path] {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!(
+                    "refusing to download: {} is a symlink. \
+                     Delete it manually before retrying.",
+                    candidate.display()
+                ));
+            }
+            _ => {}
+        }
+    }
+
     // Resume support: if a .part already exists from a previous attempt,
     // try to continue from where we left off via an HTTP Range request.
     // Saves the user hours of re-download on a flaky connection. We
     // re-hash the existing bytes so the final SHA256 verification still
     // covers the full file; reads sequentially from disk, typically
     // 200-500 MB/s on an SSD so even a 7 GB .part rehashes in under 30s.
-    let resume_from: u64 = tokio::fs::metadata(&part_path)
+    //
+    // Use symlink_metadata (not metadata) so this check doesn't silently
+    // follow a symlink-back-dated attacker plant.
+    let resume_from: u64 = tokio::fs::symlink_metadata(&part_path)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
@@ -185,9 +216,16 @@ async fn download_inner(
             resume_from,
             part_path.display()
         );
-        let mut existing = tokio::fs::File::open(&part_path)
-            .await
+        // SECURITY FIX (H-1): open the existing .part for rehash with
+        // O_NOFOLLOW so we don't hash an attacker's link target instead
+        // of the bytes we think are on disk.
+        use std::os::unix::fs::OpenOptionsExt;
+        let existing_std = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&part_path)
             .map_err(|e| format!("open existing part {}: {e}", part_path.display()))?;
+        let mut existing = tokio::fs::File::from_std(existing_std);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             let n = existing
@@ -201,7 +239,23 @@ async fn download_inner(
         }
     }
 
+    // SECURITY FIX (M-13): pin the client to HTTPS-only and reject
+    // cross-scheme redirects. Default `Policy::limited(10)` follows
+    // HTTPS→HTTP downgrades; a MITM at the DNS/CDN layer can issue
+    // `301 Location: http://evil/…` and turn the download into a
+    // plaintext channel. SHA check still catches content tampering,
+    // but plaintext leaks which model variant / bytes flow.
     let client = reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() != "https" {
+                attempt.error("redirect to non-https rejected")
+            } else if attempt.previous().len() > 5 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }))
         // A model download can easily take 10 minutes on a slow link;
         // keep the outer timeout generous. Per-read timeouts are handled
         // inside reqwest's stream.
@@ -225,6 +279,14 @@ async fn download_inner(
         .map_err(|e| format!("GET {}: {e}", spec.url))?;
     let status = resp.status();
 
+    // SECURITY FIX (H-1): open the `.part` file through a std OpenOptions
+    // with `O_NOFOLLOW | O_CLOEXEC` so a swapped-in symlink (planted
+    // between the pre-flight check and this open) fails with `ELOOP`
+    // instead of letting us truncate/append to an attacker-chosen
+    // target. tokio::fs doesn't expose `custom_flags`, so we open
+    // synchronously and wrap in `tokio::fs::File::from_std` — the
+    // synchronous open is fast and we do it exactly once per download.
+    use std::os::unix::fs::OpenOptionsExt;
     let (mut file, mut downloaded, bytes_total) = if status.as_u16() == 206 {
         // Server honored our Range — open the .part for append, continue.
         let total = resp
@@ -233,17 +295,17 @@ async fn download_inner(
             .and_then(|v| v.to_str().ok())
             .and_then(parse_content_range_total)
             .unwrap_or(spec.size_bytes);
-        let f = tokio::fs::OpenOptions::new()
+        let f = std::fs::OpenOptions::new()
             .append(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&part_path)
-            .await
             .map_err(|e| format!("open for append {}: {e}", part_path.display()))?;
         log::info!(
             "download resume accepted: {} / {} bytes already on disk",
             resume_from,
             total
         );
-        (f, resume_from, total)
+        (tokio::fs::File::from_std(f), resume_from, total)
     } else if status.is_success() {
         // 200 OK despite our Range header → server ignored us (or we
         // had no .part to begin with). Treat as a fresh download:
@@ -255,10 +317,15 @@ async fn download_inner(
             hasher = Sha256::new();
         }
         let total = resp.content_length().unwrap_or(spec.size_bytes);
-        let f = tokio::fs::File::create(&part_path)
-            .await
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&part_path)
             .map_err(|e| format!("create {}: {e}", part_path.display()))?;
-        (f, 0u64, total)
+        (tokio::fs::File::from_std(f), 0u64, total)
     } else {
         return Err(format!(
             "download failed: {} returned {}",
@@ -325,6 +392,24 @@ async fn download_inner(
         ));
     }
 
+    // SECURITY FIX (H-2): re-check that the rename destination isn't a
+    // symlink at the moment of rename. `rename(2)` on macOS will happily
+    // overwrite a file at the destination including following it when
+    // it's a symlink, which would expose a targeted-overwrite primitive.
+    // `symlink_metadata` immediately before rename is racy in principle
+    // but tightens the window dramatically — we already refused at
+    // download start and no download path creates a symlink under
+    // `~/.arcterm/models/`.
+    match std::fs::symlink_metadata(&local_path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to rename into {}: destination is a symlink",
+                local_path.display()
+            ));
+        }
+        _ => {}
+    }
+
     // Atomic rename into place. At this point the file is fully written,
     // verified (if possible), and ready to be loaded by the inference
     // engine.
@@ -332,21 +417,33 @@ async fn download_inner(
         .await
         .map_err(|e| format!("rename {}: {e}", local_path.display()))?;
 
-    // SECURITY FIX: match the 0600 we already apply to config.json and
-    // history.db. Parent dir is 0700 which blocks other local users,
-    // but consistent 0600 on the files themselves is defense-in-depth
-    // against same-uid processes with narrower expected access (e.g.
-    // sandboxed helpers, LaunchAgents running as the user). GGUFs are
-    // mmap'd by llama-cpp-2; we want any same-uid tamper to fail the
-    // open rather than succeed silently.
+    // SECURITY FIX (H-2): set 0600 via fchmod on a fd opened with
+    // O_NOFOLLOW, rather than `set_permissions` on a path (chmod(2),
+    // which follows symlinks). Avoids the chmod-strip-primitive a
+    // same-uid attacker could craft by replacing the destination with
+    // a symlink between the rename and the chmod.
+    //
+    // `File::set_permissions` on Unix is fchmod on the underlying fd,
+    // so once we hold the fd from an O_NOFOLLOW open the permission
+    // change cannot reach any other file.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(
-            &local_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .await;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&local_path)
+        {
+            Ok(fd) => {
+                let _ = fd.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            Err(e) => {
+                log::warn!(
+                    "post-rename 0600 chmod skipped for {}: {e}",
+                    local_path.display()
+                );
+            }
+        }
     }
 
     Ok(local_path.to_string_lossy().into_owned())

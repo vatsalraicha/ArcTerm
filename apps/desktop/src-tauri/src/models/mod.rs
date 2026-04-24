@@ -421,7 +421,24 @@ pub fn cleanup_stranded_parts() -> (usize, u64) {
         let in_registry = REGISTRY
             .iter()
             .any(|s| s.filename == expected_filename);
-        let Ok(meta) = entry.metadata() else { continue };
+        // SECURITY FIX (H-1): use symlink_metadata / check file_type
+        // before remove_file. entry.metadata() follows symlinks — a
+        // same-uid attacker who plants `<registered>.part` as a symlink
+        // to e.g. `~/.zshrc` would cause this sweep (and downstream
+        // download code) to touch the victim target. Refuse outright and
+        // surface via log; user investigates manually. `unlink(2)`
+        // semantics of remove_file *on a symlink* would only remove the
+        // link, not the target — but we skip even that to avoid
+        // obliterating evidence during forensics.
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        if meta.file_type().is_symlink() {
+            log::warn!(
+                "refusing to touch symlinked .part file at {} \
+                 (possible tampering; investigate manually)",
+                path.display()
+            );
+            continue;
+        }
         if !in_registry {
             bytes += meta.len();
             if std::fs::remove_file(&path).is_ok() {
@@ -497,16 +514,35 @@ pub fn normalize_model_perms() -> (usize, usize) {
             continue;
         }
         total += 1;
-        let Ok(meta) = entry.metadata() else { continue };
+        // SECURITY FIX (H-1): don't follow symlinks when checking / changing
+        // mode on registry-installed GGUFs. set_permissions → chmod(2)
+        // follows symlinks, which would let a same-uid attacker whose
+        // planted link survives this path use us as a chmod-strip primitive.
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        if meta.file_type().is_symlink() {
+            log::warn!(
+                "refusing to normalize perms on symlinked GGUF at {} \
+                 (possible tampering; investigate manually)",
+                path.display()
+            );
+            continue;
+        }
         let current_mode = meta.permissions().mode() & 0o777;
         if current_mode == 0o600 {
             continue;
         }
-        if std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .is_ok()
+        // Open with O_NOFOLLOW so fchmod cannot follow a swapped-in
+        // symlink between the symlink_metadata check above and this
+        // call. `File::set_permissions` on Unix is fchmod on the fd.
+        use std::os::unix::fs::OpenOptionsExt;
+        let open = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path);
+        let Ok(fd) = open else { continue };
+        if fd
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .is_ok()
         {
             normalized += 1;
             log::info!(

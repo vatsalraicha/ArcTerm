@@ -325,6 +325,50 @@ fn base_command(binary: &str) -> Command {
             cmd.env_remove(&name);
         }
     }
+    // SECURITY FIX (M-11): strip Node.js / dynamic-loader / proxy / TLS
+    // env vars that would otherwise let an attacker with shell-config
+    // write access achieve code execution inside the Claude CLI
+    // (NODE_OPTIONS=--require /tmp/evil.js) or MITM its HTTPS calls
+    // (NODE_EXTRA_CA_CERTS, HTTPS_PROXY). These are NOT auth vars so
+    // the prefix pass above doesn't catch them.
+    //
+    // The Claude CLI is a Node program; a single NODE_OPTIONS line in
+    // ~/.zshenv is enough to preload arbitrary code on every ⌘K.
+    // Removing these here short-circuits that attack path.
+    const HARDENING_BLOCKLIST: &[&str] = &[
+        "NODE_OPTIONS",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "NODE_V8_COVERAGE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "HTTPS_PROXY_AUTH",
+        "HTTP_PROXY_AUTH",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+    ];
+    for var in HARDENING_BLOCKLIST {
+        cmd.env_remove(var);
+    }
+    // SECURITY FIX (L-7): pin an explicit cwd so the Claude CLI doesn't
+    // read an attacker-planted `.claude/settings.json` from, e.g.,
+    // `~/Downloads` when the user double-clicks the app bundle. $HOME
+    // is the natural fallback; the user's real ~/.claude is what we
+    // want this subprocess to honor.
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.current_dir(home);
+    }
     cmd.stdin(Stdio::null());
     cmd
 }

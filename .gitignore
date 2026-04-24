@@ -23,6 +23,7 @@ target/
 Dos_And_Donts.md
 Project_Prompt_Detailed.md
 Task_For_Session_*.md
+Sec_And_Vulnerability_Issues.md
 
 # Legacy Fig autocomplete clone. The importer that consumed this
 # (scripts/import-fig-specs.mjs) was retired after Fig was sunset by

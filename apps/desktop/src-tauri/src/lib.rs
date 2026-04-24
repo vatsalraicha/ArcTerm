@@ -183,7 +183,15 @@ pub fn run() {
     let settings_boot = settings.clone();
 
     let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        // SECURITY (H-4): `tauri_plugin_shell` is intentionally NOT
+        // registered. ArcTerm spawns child processes only through the
+        // backend-curated `ai/claude.rs` and `pty.rs` paths — never
+        // directly from the renderer. Registering the plugin injects
+        // its JS shim into the webview; combined with a future
+        // `shell:*` capability grant, a renderer XSS/bug would open
+        // arbitrary-subprocess-spawn. Leave it uninstalled; if a
+        // narrow need arises (e.g. "open URL in default browser"),
+        // prefer `tauri_plugin_opener` with an explicit allowlist.
         // Native macOS menu bar. On macOS, setting a menu here replaces
         // Tauri's default, so we have to recreate the standard items
         // (About, Services, Hide/Show, Quit, Edit verbs, Window). The

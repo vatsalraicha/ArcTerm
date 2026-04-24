@@ -286,12 +286,25 @@ export class InputEditor {
      */
     private readonly onPaste = (ev: ClipboardEvent): void => {
         ev.preventDefault();
-        const text = ev.clipboardData?.getData("text/plain") ?? "";
-        if (!text) return;
+        const raw = ev.clipboardData?.getData("text/plain") ?? "";
+        if (!raw) return;
+        // SECURITY FIX (L-14): cap very large pastes so the
+        // contenteditable + getValue() scan don't freeze the UI. Rust-
+        // side pty_write caps at 1 MiB, so the shell can never see a
+        // larger payload anyway; clipping to 256 KiB in the editor keeps
+        // the renderer responsive and avoids surprising line-count
+        // blow-ups from accidentally-copied large files.
+        const PASTE_CAP = 256 * 1024;
+        const text = raw.length > PASTE_CAP ? raw.slice(0, PASTE_CAP) : raw;
         // Normalize Windows/Mac-classic line endings to \n so we don't end
         // up with stray \r bytes in the submitted command (which the PTY
         // would forward verbatim and confuse zle's line parser).
         const normalized = text.replace(/\r\n?/g, "\n");
+        if (raw.length > PASTE_CAP) {
+            console.warn(
+                `paste truncated: ${raw.length} bytes clipped to ${PASTE_CAP}`,
+            );
+        }
         this.removeGhost();
         const sel = window.getSelection();
         const node = document.createTextNode(normalized);

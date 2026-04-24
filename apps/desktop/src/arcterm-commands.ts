@@ -238,7 +238,17 @@ async function cmdDownload(session: Session, args: string[]): Promise<void> {
     let id = args[0];
     if (id === "gemma") id = "gemma-4-e2b-it-q4km";
 
-    writeLine(session, `Starting download: \x1b[36m${id}\x1b[0m`);
+    // SECURITY FIX (L-10): strip ANSI / control bytes out of the id
+    // before we interpolate it into styled status lines. The Rust-side
+    // allowlist will still reject an unknown id, but only AFTER we've
+    // already written the "Starting download: <id>" echo. An id like
+    // "\x1b[2J" would clear the screen before the rejection lands.
+    // Users can't type \x1b via the editor, but programmatic sources
+    // (history replay, URL handlers, pasted AI output) can.
+    // eslint-disable-next-line no-control-regex
+    const safeId = id.replace(/[\x00-\x1f\x7f]/g, "");
+
+    writeLine(session, `Starting download: \x1b[36m${safeId}\x1b[0m`);
     writeLine(session, "This may take a few minutes depending on your connection.");
     writeLine(session, "");
 

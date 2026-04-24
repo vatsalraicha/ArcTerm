@@ -142,25 +142,64 @@ impl SettingsStore {
         }
         let path = dir.join("config.json");
 
-        let settings = match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str::<Settings>(&contents) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!(
-                        "settings parse failed ({}), using defaults — file preserved",
-                        e
-                    );
-                    Settings::default()
+        // SECURITY FIX (L-4): cap config.json reads at 1 MiB. A same-uid
+        // attacker (or a buggy write path) that leaves a 500 MB config on
+        // disk would otherwise allocate that much memory on every boot.
+        // Real settings files are a few hundred bytes; 1 MiB is orders of
+        // magnitude above the realistic ceiling.
+        const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+        let settings = match fs::File::open(&path) {
+            Ok(f) => {
+                use std::io::Read;
+                let mut contents = String::new();
+                let mut take = f.take(MAX_CONFIG_BYTES + 1);
+                match take.read_to_string(&mut contents) {
+                    Ok(_) => {
+                        if contents.len() as u64 > MAX_CONFIG_BYTES {
+                            log::warn!(
+                                "config.json exceeds {} byte cap; using defaults \
+                                 (file preserved for inspection)",
+                                MAX_CONFIG_BYTES
+                            );
+                            Settings::default()
+                        } else {
+                            serde_json::from_str::<Settings>(&contents)
+                                .unwrap_or_else(|e| {
+                                    log::warn!(
+                                        "settings parse failed ({}), using defaults — \
+                                         file preserved",
+                                        e
+                                    );
+                                    Settings::default()
+                                })
+                        }
+                    }
+                    Err(e) => return Err(format!("read {}: {e}", path.display())),
                 }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Settings::default()
             }
-            Err(e) => return Err(format!("read {}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            Err(e) => return Err(format!("open {}: {e}", path.display())),
         };
 
+        // SECURITY FIX (M-17): re-validate claudePath at boot. Validation
+        // only fires on `settings_set`; a pinned path that has since been
+        // replaced (brew reinstall, filesystem move), or a config.json
+        // flipped by a brief-write-access attacker, would otherwise be
+        // trusted at spawn time with no re-check. On failure we clear the
+        // in-memory copy and fall back to PATH lookup — but we do NOT
+        // clobber disk, so the user can see the old value in the settings
+        // panel and decide whether it was intentional.
+        let mut final_settings = settings;
+        if let Err(e) = validate_claude_path(&final_settings.ai.claude_path) {
+            log::warn!(
+                "stored claudePath failed boot revalidation ({e}); \
+                 clearing in-memory copy, PATH lookup will be used"
+            );
+            final_settings.ai.claude_path.clear();
+        }
+
         Ok(Self {
-            inner: RwLock::new(settings),
+            inner: RwLock::new(final_settings),
             path,
         })
     }
@@ -308,6 +347,48 @@ pub fn validate_claude_path(path: &str) -> Result<(), String> {
                 "claudePath '{path}' is not executable by owner (mode {:o})",
                 mode & 0o777
             ));
+        }
+        // SECURITY FIX (M-17): walk every ancestor directory and assert
+        // it is owned by the user or root and not group/world-writable.
+        // Without this, a binary at `/tmp/mine/claude` passes the file-
+        // level checks even if `/tmp/mine/` itself is world-writable —
+        // an attacker can then `mv claude claude.bak; cp /bin/sh claude`
+        // and win. Mirrors OpenSSH's StrictModes.
+        let mut current: Option<&Path> = p.parent();
+        while let Some(dir) = current {
+            let dir_meta = match fs::symlink_metadata(dir) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(format!(
+                        "claudePath ancestor '{}' not accessible: {e}",
+                        dir.display()
+                    ));
+                }
+            };
+            let dir_mode = dir_meta.permissions().mode();
+            if dir_mode & 0o022 != 0 {
+                return Err(format!(
+                    "claudePath ancestor '{}' is group/world-writable (mode {:o}); \
+                     refusing to execute",
+                    dir.display(),
+                    dir_mode & 0o777
+                ));
+            }
+            let dir_uid = dir_meta.uid();
+            if dir_uid != uid && dir_uid != 0 {
+                return Err(format!(
+                    "claudePath ancestor '{}' owned by uid {} (not user or root); \
+                     refusing to execute",
+                    dir.display(),
+                    dir_uid
+                ));
+            }
+            // Stop at filesystem root.
+            let next = dir.parent();
+            if next == Some(dir) || next.is_none() {
+                break;
+            }
+            current = next;
         }
     }
     Ok(())

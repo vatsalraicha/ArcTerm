@@ -152,18 +152,17 @@ export function aiStream(
  * indicates a Trojan-Source-style visual/byte mismatch attack
  * (CVE-2021-42574 class).
  *
- *   - Bidi controls (U+202A-E, U+2066-9): reverse the visual reading
- *     order so the displayed text looks benign while the bytes sent
- *     to the shell are malicious.
- *   - Zero-width characters (U+200B-D, U+FEFF, U+2060): invisible
- *     separators that can split or embed payload text inside what
- *     looks like an ordinary identifier.
- *   - Line/paragraph separators (U+2028-9): can terminate a shell
- *     line in ways the user won't see when the model's output is
- *     rendered as plain text.
- *   - Other known-invisible codepoints (soft hyphen U+00AD,
- *     combining-grapheme-joiner U+034F, various Hangul fillers and
- *     Mongolian vowel separator).
+ * M-6 expanded the list beyond the original hand-enumerated set to
+ * reject every Unicode format (Cf) and control (Cc) character except
+ * the three shell-legitimate whitespace forms (\t, \n, \r). This
+ * subsumes the old enumeration and additionally catches:
+ *
+ *   - Tag characters U+E0020–E007F (invisible prompt-injection carriers,
+ *     widely abused since ~2023).
+ *   - Variation selectors U+FE00–FE0F, U+E0100–E01EF (covert encoders).
+ *   - Mongolian Free Variation Selectors U+180B–180D.
+ *   - Language tag U+E0001.
+ *   - Any future Cf / Cc codepoint added by a later Unicode version.
  *
  * On detection we reject the command outright — `extractCommand` and
  * `extractFixCommand` return `null`. Callers surface a user-visible
@@ -172,7 +171,16 @@ export function aiStream(
  * after the invisibles are removed.
  */
 const DANGEROUS_INVISIBLE_CHARS =
-    /[\u00AD\u034F\u115F\u1160\u17B4\u17B5\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\u3164\uFEFF]/;
+    /[\p{Cf}\u2028\u2029]|[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/u;
+
+/**
+ * SECURITY: for the command-normalization path in `classifyRisk`, the
+ * bar is lower — we just need to collapse tricks like NBSP into plain
+ * whitespace and strip obvious zero-widths so the regex pass sees the
+ * "real" command. Shell-legitimate whitespace (space, tab) survives.
+ */
+const INVISIBLE_NOT_WHITESPACE =
+    /[\p{Cf}\u200B-\u200F\u2028\u2029\u2060-\u2064\u2066-\u206F\uFEFF]/gu;
 
 /**
  * Utility: strip markdown fences + reasoning blocks from a model-generated
@@ -241,12 +249,35 @@ const RISK_PATTERNS: RiskPattern[] = [
     { re: /\brm\s+\/(?!tmp\b|var\/tmp\b)/i, reason: "rm targeting a root-level path" },
     { re: /\bsudo\b/, reason: "sudo privilege escalation" },
     { re: /\b(dd|mkfs|fdisk|shred|wipefs)\b/, reason: "raw disk / filesystem mutator" },
+    // H-3: copying/streaming onto a raw disk-device is as dangerous as
+    // `dd`; both of these flags passing are worse than `rm`.
+    { re: /\bdd\b[\s\S]*?\bof=\/dev\//, reason: "dd onto /dev device" },
+    { re: /\bcp\b[\s\S]*?\s\/dev\/(?!null\b|stdout\b|stderr\b|tty\b)/, reason: "cp to a /dev device" },
     { re: /\bchmod\s+[-+]?[0-9]*[0-9][0-9][0-9]/, reason: "octal chmod" },
+    // H-3: chmod -R ... 000/0000 effectively locks users out of their own files.
+    { re: /\bchmod\s+(?:-R|--recursive)\b.*\b0*0{3,}\b/, reason: "recursive chmod to 000" },
     { re: /\bchown\b/, reason: "chown" },
+    // H-3: recursive chown on a user tree is a classic "lock yourself out"
+    // payload even without a privilege-escalation (passed to sudo, it's
+    // catastrophic; without sudo it still trashes ownership of user files).
+    { re: /\bchown\s+(?:-R|--recursive)\b/, reason: "recursive chown" },
     { re: /\|\s*(sh|bash|zsh|fish)\b/, reason: "piping into a shell" },
     { re: /\b(curl|wget|fetch)\b.*\|\s*(sh|bash|zsh)/i, reason: "curl-pipe-to-shell" },
     { re: />\s*\/dev\/(?!null\b|stderr\b|stdout\b|tty\b)/, reason: "redirect to a device" },
     { re: />\s*\/etc\//, reason: "redirect into /etc" },
+    // H-3: truncation of HOME-anchored paths. `>`, `>|` (zsh noclobber
+    // override), and `>>` are all covered. Space after the redirect
+    // operator is optional in POSIX shells.
+    { re: /(^|[\s;&|(])>\|?\s*~/, reason: "redirect-truncate into $HOME" },
+    { re: /(^|[\s;&|(])>\|?\s*\$HOME\b/, reason: "redirect-truncate into $HOME" },
+    { re: /(^|[\s;&|(])>\|?\s*\$\{HOME/, reason: "redirect-truncate into $HOME" },
+    // H-3: `find … -delete` / `find … -exec rm` are the two most common
+    // destructive find uses. Both have well-documented footgun history.
+    { re: /\bfind\b[\s\S]*?-delete\b/, reason: "find -delete" },
+    { re: /\bfind\b[\s\S]*?-exec\s+(rm|shred|mv)\b/, reason: "find -exec rm/shred/mv" },
+    // H-3: `mv <something> /dev/null` deletes the source (it rename(2)s
+    // onto the device node, and bash+zsh happily follow).
+    { re: /\bmv\s+[^|;&]*\s+\/dev\/(null|zero)\b/, reason: "mv into /dev/null" },
     { re: /\b(killall|pkill)\s+-9/, reason: "force-kill" },
     { re: /\bgit\s+(push|reset|clean)\s+.*(--force|-f\b|--hard)/i, reason: "destructive git flag" },
     { re: /\bnpm\s+(unpublish|publish)\b/, reason: "npm publish/unpublish" },
@@ -254,17 +285,58 @@ const RISK_PATTERNS: RiskPattern[] = [
 ];
 
 /**
+ * SECURITY (H-3 defense-in-depth): any AI-sourced command containing
+ * shell metacharacters gets flagged even if no explicit rule matches.
+ * This catches the "unknown unknown" destructive combinator we haven't
+ * yet written a rule for — prompt-injection payloads that chain safe
+ * primitives into something dangerous (`curl X && rm Y`, subshell
+ * exfiltration, etc.). Users can still click through the confirm
+ * dialog; we just refuse to treat it as low-risk by default.
+ */
+const SHELL_METACHARS_RE = /[;&|`]|\$\(|&&|\|\||>>|<\(/;
+
+/**
  * Run all patterns against `cmd`, return the first match's reason.
  * `null` = command passes the heuristic with no warning. Not a
  * security boundary on its own — social engineering can still get
  * a careless user to click twice — but it raises the friction floor
  * for the most common attack payloads.
+ *
+ * M-5: normalize the input before regex matching. Heuristic command
+ * classification is trivially bypassed when the attacker substitutes a
+ * non-ASCII look-alike whitespace (NBSP, thin-space, ideographic space)
+ * or a fullwidth Latin form for a letter. Apply NFKC to collapse
+ * look-alikes and replace every non-ASCII whitespace with a plain
+ * space before running the patterns. Bidi overrides are stripped by
+ * `DANGEROUS_INVISIBLE_CHARS` upstream (extractCommand rejects first).
  */
+function normalizeForRiskCheck(cmd: string): string {
+    let s = cmd;
+    try {
+        s = s.normalize("NFKC");
+    } catch {
+        // Defensive — String.prototype.normalize only throws for bad forms.
+    }
+    // Strip zero-width / format controls that pass as no-chars visually.
+    s = s.replace(INVISIBLE_NOT_WHITESPACE, "");
+    // Collapse Unicode whitespace to a single ASCII space so `\s` /
+    // `\b` in our patterns behave as humans expect.
+    s = s.replace(/\p{White_Space}/gu, " ");
+    return s;
+}
+
 export function classifyRisk(cmd: string): string | null {
+    const normalized = normalizeForRiskCheck(cmd);
     for (const pat of RISK_PATTERNS) {
-        if (pat.re.test(cmd)) {
+        if (pat.re.test(normalized)) {
             return pat.reason;
         }
+    }
+    // H-3 defense-in-depth: any shell metacharacter in an AI-sourced
+    // command means "not safe to auto-run." Frame it softly so the UI
+    // can still present a confirm rather than a hard rejection.
+    if (SHELL_METACHARS_RE.test(normalized)) {
+        return "shell metacharacter — confirm before running";
     }
     return null;
 }

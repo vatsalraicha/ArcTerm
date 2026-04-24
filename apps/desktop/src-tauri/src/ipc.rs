@@ -107,6 +107,14 @@ pub fn history_update_exit(
     store.update_exit(id, exit_code, duration_ms)
 }
 
+// SECURITY (L-6): legitimate history queries are typed by a human — a
+// few dozen characters at most. A compromised renderer that loops
+// `history_search(query=<1 MB string>, …)` against a large `history.db`
+// burns CPU in SQLite's LIKE + ESCAPE path. Hard-cap at the IPC
+// boundary so the SQL layer never sees the abuse.
+const MAX_HISTORY_QUERY_BYTES: usize = 1024;
+const MAX_HISTORY_CWD_BYTES: usize = 4096;
+
 #[tauri::command]
 pub fn history_search(
     store: State<'_, HistoryStore>,
@@ -114,6 +122,15 @@ pub fn history_search(
     cwd: Option<String>,
     limit: Option<u32>,
 ) -> Result<Vec<Entry>, String> {
+    if query.len() > MAX_HISTORY_QUERY_BYTES {
+        return Err(format!(
+            "history query exceeds {} byte cap",
+            MAX_HISTORY_QUERY_BYTES
+        ));
+    }
+    if cwd.as_deref().map(str::len).unwrap_or(0) > MAX_HISTORY_CWD_BYTES {
+        return Err("history cwd exceeds cap".into());
+    }
     store.search(&query, cwd.as_deref(), limit.unwrap_or(50))
 }
 
@@ -123,6 +140,15 @@ pub fn history_autosuggest(
     prefix: String,
     cwd: Option<String>,
 ) -> Result<Option<String>, String> {
+    if prefix.len() > MAX_HISTORY_QUERY_BYTES {
+        return Err(format!(
+            "history prefix exceeds {} byte cap",
+            MAX_HISTORY_QUERY_BYTES
+        ));
+    }
+    if cwd.as_deref().map(str::len).unwrap_or(0) > MAX_HISTORY_CWD_BYTES {
+        return Err("history cwd exceeds cap".into());
+    }
     store.autosuggest(&prefix, cwd.as_deref())
 }
 
@@ -152,6 +178,58 @@ pub fn ai_active_backend(
     }))
 }
 
+/// SECURITY (M-9): enforce an upper bound on every attacker-influenceable
+/// string field in an `AiRequest` before we feed it into the Claude
+/// subprocess argv (where ARG_MAX is ~1 MiB on macOS) or the llama.cpp
+/// tokenizer (bounded only by RAM). A compromised renderer could
+/// otherwise pass a multi-GB prompt and force the backend to copy it
+/// through the pipeline once per stage. These caps are generous enough
+/// that no legitimate user workflow hits them.
+const MAX_PROMPT_BYTES: usize = 128 * 1024;
+const MAX_CWD_BYTES: usize = 4 * 1024;
+const MAX_SHELL_BYTES: usize = 256;
+const MAX_BRANCH_BYTES: usize = 256;
+const MAX_RECENT_CMD_BYTES: usize = 2048;
+const MAX_RECENT_CMDS: usize = 50;
+const MAX_FAILING_CMD_BYTES: usize = 16 * 1024;
+const MAX_FAILING_OUTPUT_BYTES: usize = 32 * 1024;
+
+fn enforce_ai_request_caps(req: &AiRequest) -> Result<(), String> {
+    if req.prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!(
+            "prompt exceeds {} byte cap ({} bytes submitted)",
+            MAX_PROMPT_BYTES,
+            req.prompt.len()
+        ));
+    }
+    if let Some(ctx) = &req.context {
+        if ctx.cwd.as_deref().map(str::len).unwrap_or(0) > MAX_CWD_BYTES {
+            return Err("context.cwd exceeds cap".into());
+        }
+        if ctx.shell.as_deref().map(str::len).unwrap_or(0) > MAX_SHELL_BYTES {
+            return Err("context.shell exceeds cap".into());
+        }
+        if ctx.git_branch.as_deref().map(str::len).unwrap_or(0) > MAX_BRANCH_BYTES {
+            return Err("context.git_branch exceeds cap".into());
+        }
+        if ctx.recent_commands.len() > MAX_RECENT_CMDS {
+            return Err("context.recent_commands list exceeds cap".into());
+        }
+        for c in &ctx.recent_commands {
+            if c.len() > MAX_RECENT_CMD_BYTES {
+                return Err("context.recent_commands entry exceeds cap".into());
+            }
+        }
+        if ctx.failing_command.as_deref().map(str::len).unwrap_or(0) > MAX_FAILING_CMD_BYTES {
+            return Err("context.failing_command exceeds cap".into());
+        }
+        if ctx.failing_output.as_deref().map(str::len).unwrap_or(0) > MAX_FAILING_OUTPUT_BYTES {
+            return Err("context.failing_output exceeds cap".into());
+        }
+    }
+    Ok(())
+}
+
 /// Single-shot ask. Returns the full response when complete. Used by the
 /// Cmd+K "generate command" flow where we need the whole answer before
 /// populating the editor.
@@ -161,6 +239,7 @@ pub async fn ai_ask(
     history: State<'_, HistoryStore>,
     req: AiRequest,
 ) -> Result<AiResponse, String> {
+    enforce_ai_request_caps(&req)?;
     // SECURITY: only include recent-command history for Explain/Chat
     // requests. Command-generation mode (Cmd+K, `?` prefix) bypasses
     // history to deny prompt-injection-via-poisoned-history. See
@@ -185,6 +264,7 @@ pub async fn ai_stream(
     history: State<'_, HistoryStore>,
     req: AiRequest,
 ) -> Result<String, String> {
+    enforce_ai_request_caps(&req)?;
     let id = Uuid::new_v4().to_string();
     let include_history = !matches!(req.mode, crate::ai::AiMode::Command);
     let enriched = AiRequest {
