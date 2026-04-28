@@ -33,6 +33,10 @@ Sec_And_Vulnerability_Issues.md
 # abandoned upstream TypeScript. Safe to delete locally any time.
 .fig-autocomplete-source/
 
+# Demo deck + screenshots (kept on disk, not published)
+ArcTerm-Demo.pptx
+screenshots/
+
 # Logs
 *.log
 npm-debug.log*
