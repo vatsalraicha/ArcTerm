@@ -333,6 +333,7 @@ buffer between block-start and block-end absolute line indices, caps at
 | `⌘⇧[` / `⌘⇧]` | Prev / next session |
 | `⌘K` | AI panel → command generation |
 | `⌘⇧E` | AI panel → explain (uses last error or editor contents) |
+| `⌘⇧F` | Global search — command history + session scrollback |
 | `⌘,` | Settings panel |
 | `? <query>` | Inline AI command shortcut |
 | `Tab` | Completion dropdown (FS paths + Fig subcommands/options) |
@@ -457,12 +458,16 @@ Tests green, clippy green, cargo-audit green.
 **Not beta yet.** Blockers — see roadmap below.
 
 ### Phase 7 tail (folded into Phase 9 below)
-- 🔲 **Global search** (`⌘⇧F`). Search across command history +
-  session buffers. Reuse history-overlay component pattern.
-- 🔲 **Session rename persistence.** Renames work in-memory but die
-  on restart. Small — extend `SettingsStore` schema with a
-  `sessions: Vec<PersistedSession>` field, save on rename, restore
-  on boot.
+- ✅ **Global search** (`⌘⇧F`). Searches command history (any cwd) +
+  every open session's xterm scrollback in one panel. Commands populate
+  the editor on pick; buffer hits switch to the session and scroll the
+  viewport. Lives in `global-search-overlay.ts`, mounted in main.ts.
+  `TerminalHandle` gained `searchBuffer()` and `scrollToLine()` to
+  power the buffer half.
+- ✅ **Session rename persistence.** `Settings.sessions: Vec<PersistedSession>`
+  with sanitize on read+write; new `sessions_get` / `sessions_set` IPC;
+  frontend persists on add/remove/rename (250 ms debounced) and
+  restores tabs on boot.
 - 🔲 **`⌘⏎` agent conversation mode.** Streaming chat panel that
   proposes + (with approval) executes commands. Big UX surface —
   explicitly deferred to v1.1 in the current plan, not a beta blocker.
@@ -486,12 +491,12 @@ Tests green, clippy green, cargo-audit green.
 ### Roadmap to beta
 
 **Phase 9 — close the alpha gaps (~1 week of focused work):**
-- Session rename persistence (1-2 hrs)
-- Global search `⌘⇧F` (half day)
-- Written decision: "VS Code extension is v1.x, not v1.0." Put in
+- ✅ Session rename persistence (shipped on `main`)
+- ✅ Global search `⌘⇧F` (shipped on `main`)
+- 🔲 Written decision: "VS Code extension is v1.x, not v1.0." Put in
   CONTRIBUTING.md or ROADMAP.md so contributors don't start on it
   expecting it to land soon.
-- Explicit defer of `⌘⏎` agent mode to v1.1 (also documented).
+- 🔲 Explicit defer of `⌘⏎` agent mode to v1.1 (also documented).
 
 **Phase 10 — distribution polish (~2 days):**
 - Ad-hoc codesign (`codesign --force --deep --sign - ArcTerm.app`)

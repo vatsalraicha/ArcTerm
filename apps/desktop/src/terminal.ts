@@ -112,6 +112,27 @@ export interface TerminalHandle {
   ) => string;
   /** Move keyboard focus into xterm (for TUI programs that need direct keys). */
   focus: () => void;
+  /**
+   * Search the scrollback (the "normal" buffer, not the alternate buffer
+   * a TUI program may currently own) for a substring. Match is case-
+   * insensitive against the line's plain text — any ANSI styling is
+   * stripped by xterm's translateToString. Returns absolute line indices
+   * so the caller can pass them to `scrollToLine` for jump-to-result.
+   *
+   * Bounded by `max` (default 100) so a single-character query against a
+   * fully-populated 10k-line scrollback can't allocate megabytes of
+   * match objects.
+   */
+  searchBuffer: (
+    query: string,
+    max?: number,
+  ) => Array<{ absLine: number; text: string }>;
+  /**
+   * Scroll xterm so that `absLine` lands roughly mid-viewport. Used by
+   * the global-search overlay's "jump to match" action. No-op if the
+   * absolute index is out of range.
+   */
+  scrollToLine: (absLine: number) => void;
   /** Unique id for this PTY session — stored with history entries. */
   sessionId: string;
 }
@@ -480,6 +501,46 @@ export async function setupTerminal(
       return captured;
     },
     focus: () => term.focus(),
+    searchBuffer: (query: string, max = 100) => {
+      // Empty query returns nothing — keeps the overlay's keystroke
+      // path cheap (no allocation per character) and avoids dumping
+      // 10k lines into the result list before the user has typed.
+      if (query.trim().length === 0) return [];
+      // Always search the normal buffer. When a TUI (vim, less) is in
+      // the alternate buffer, `term.buffer.active` is the TUI's screen
+      // and contains no scrollback worth searching; the user's
+      // history-of-output lives in `buffer.normal` either way.
+      const buf = term.buffer.normal;
+      const needle = query.toLowerCase();
+      const total = buf.length;
+      const out: { absLine: number; text: string }[] = [];
+      // Walk newest-first so the most recent matches are returned
+      // first; short-circuits cheaply once `max` is hit on long
+      // scrollbacks.
+      for (let y = total - 1; y >= 0; y--) {
+        const line = buf.getLine(y);
+        if (!line) continue;
+        const text = line.translateToString(true);
+        if (text.length === 0) continue;
+        if (text.toLowerCase().includes(needle)) {
+          out.push({ absLine: y, text });
+          if (out.length >= max) break;
+        }
+      }
+      return out;
+    },
+    scrollToLine: (absLine: number) => {
+      const buf = term.buffer.normal;
+      if (absLine < 0 || absLine >= buf.length) return;
+      // xterm's `scrollLines` takes a delta from the current viewport
+      // top. Center the target line in the viewport when possible:
+      // a target one-third from the top is empirically more useful
+      // than dead-center because the user usually wants context AFTER
+      // the match (the output that followed the matching line).
+      const viewportTop = buf.viewportY;
+      const desiredTop = Math.max(0, absLine - Math.floor(term.rows / 3));
+      term.scrollLines(desiredTop - viewportTop);
+    },
     sessionId: ptyId,
   };
 }

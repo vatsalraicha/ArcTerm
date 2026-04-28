@@ -17,6 +17,7 @@ import { listen } from "@tauri-apps/api/event";
 import { SessionManager, type Session } from "./session-manager";
 import { InputEditor } from "./input-editor";
 import { HistoryOverlay } from "./history-overlay";
+import { GlobalSearchOverlay } from "./global-search-overlay";
 import { Sidebar } from "./sidebar";
 import { AiPanel, type ExplainTarget } from "./ai-panel";
 import { aiAsk, aiIsAvailable, extractCommand, hasDangerousInvisibles, type AiContext } from "./ai";
@@ -386,6 +387,33 @@ async function boot(mounts: Mounts): Promise<void> {
     manager,
   });
 
+  // --- Global search (⌘⇧F) ---------------------------------------------
+  //
+  // Searches command history (any cwd) AND every open session's xterm
+  // scrollback in one place. Picking a command-kind hit populates the
+  // editor (same as ↑/Ctrl+R). Picking a buffer-kind hit jumps to the
+  // session and scrolls its viewport so the matching line is in view —
+  // hands focus back to the editor afterwards so the user can keep
+  // typing without an extra click.
+  const globalSearch = new GlobalSearchOverlay({
+    host: mounts.overlayHost,
+    manager,
+    onPickCommand: (cmd) => {
+      editor.setValue(cmd);
+      editor.focus();
+    },
+    onPickBuffer: async (sessionId, absLine) => {
+      const session = manager.get(sessionId);
+      if (!session) return;
+      // Switch first so the target xterm is the visible one before we
+      // scroll. Switching is a no-op if it's already active.
+      await manager.switchTo(sessionId);
+      session.terminal.scrollToLine(absLine);
+      editor.focus();
+    },
+    onDismiss: () => editor.focus(),
+  });
+
   // --- AI panel --------------------------------------------------------
   //
   // Availability check gates the keybindings: if `claude` isn't on PATH
@@ -499,6 +527,19 @@ async function boot(mounts: Mounts): Promise<void> {
     if (ev.key === "," && !ev.shiftKey) {
       ev.preventDefault();
       if (!settingsPanel.isOpen()) void settingsPanel.open();
+      return;
+    }
+
+    // ⌘⇧F — global search (commands + session output). Matches VSCode's
+    // "Find in Files" convention. Available regardless of AI state — it
+    // doesn't touch any AI backend.
+    //
+    // Match on ev.code so a non-US layout where Shift+F doesn't produce
+    // an "f" still triggers. (ev.key on Shift+F is "F" on most layouts,
+    // but ev.code is layout-stable.)
+    if (ev.shiftKey && ev.code === "KeyF") {
+      ev.preventDefault();
+      if (!globalSearch.isOpen()) globalSearch.open();
       return;
     }
 
