@@ -91,6 +91,13 @@ export class SessionManager {
     private readonly removedListeners = new Set<Listener>();
     private readonly updatedListeners = new Set<Listener>();
     private readonly activeChangedListeners = new Set<(id: string | null) => void>();
+    /** Fires whenever the persisted shape (count, order, names) changes —
+     *  i.e. on add, remove, or rename — but NOT on the high-frequency
+     *  state churn (cwd, branch, exit code, running flag) that
+     *  `session-updated` covers. main.ts wires this to a debounced
+     *  IPC `sessions_set` so disk writes happen at most once per real
+     *  user action. */
+    private readonly persistedChangedListeners = new Set<() => void>();
 
     /** Current theme; applied to every session created from now on, and
      *  pushed into existing sessions on change. */
@@ -155,9 +162,9 @@ export class SessionManager {
      *  from racing and spawning duplicate PTYs. */
     private createInFlight: Promise<Session> | null = null;
 
-    async create(): Promise<Session> {
+    async create(opts?: { name?: string }): Promise<Session> {
         if (this.createInFlight) return this.createInFlight;
-        this.createInFlight = this.doCreate();
+        this.createInFlight = this.doCreate(opts);
         try {
             return await this.createInFlight;
         } finally {
@@ -165,7 +172,7 @@ export class SessionManager {
         }
     }
 
-    private async doCreate(): Promise<Session> {
+    private async doCreate(opts?: { name?: string }): Promise<Session> {
         // Build the DOM frame first so we can hand setupTerminal() a real
         // host element. The xterm addon requires the host to be in the
         // document tree (even if hidden) so it can measure font metrics.
@@ -198,6 +205,11 @@ export class SessionManager {
         writeWelcome(terminal);
 
         const nameIndex = this.nextNameIndex++;
+        // Honor an explicit name override (used by boot-time restore so a
+        // recreated tab gets its previously-saved label). Empty/whitespace
+        // names fall through to the default scheme so a poisoned config
+        // can never produce a row with a blank label.
+        const initialName = opts?.name?.trim();
         const session: Session = {
             id: terminal.sessionId,
             // Placeholder — renumber() below sets the real value based on
@@ -206,7 +218,9 @@ export class SessionManager {
             terminal,
             frame,
             state: {
-                name: `Session ${nameIndex}`,
+                name: initialName && initialName.length > 0
+                    ? initialName
+                    : `Session ${nameIndex}`,
                 cwd: null,
                 branch: "",
                 lastCommand: null,
@@ -242,6 +256,7 @@ export class SessionManager {
         // Fire the "added" event before switching — sidebar wants to render
         // the row before we try to mark it active.
         for (const l of this.addedListeners) l(session);
+        this.emitPersistedChanged();
 
         // Activate. If this is the first session, activeId was null and
         // switchTo handles it directly.
@@ -315,6 +330,7 @@ export class SessionManager {
         session.frame.remove();
 
         for (const l of this.removedListeners) l(session);
+        this.emitPersistedChanged();
 
         // Switch active if we just closed the active session.
         if (this.activeId === id) {
@@ -328,7 +344,7 @@ export class SessionManager {
         }
     }
 
-    /** Rename a session. Emits `session-updated`. */
+    /** Rename a session. Emits `session-updated` and `persisted-changed`. */
     rename(id: string, name: string): void {
         const s = this.sessions.get(id);
         if (!s) return;
@@ -336,6 +352,24 @@ export class SessionManager {
         if (trimmed === s.state.name) return;
         s.state.name = trimmed;
         this.emitUpdated(s);
+        this.emitPersistedChanged();
+    }
+
+    /** Snapshot of the persisted shape — names in display order. The
+     *  caller (main.ts) feeds this straight to `sessions_set`. Skips
+     *  sessions whose name is somehow blank (defensive — shouldn't happen
+     *  given the construction path, but a single empty name would tank
+     *  the sanitize pass on the Rust side and silently drop the entry). */
+    persistedSnapshot(): { name: string }[] {
+        const out: { name: string }[] = [];
+        for (const id of this.order) {
+            const s = this.sessions.get(id);
+            if (!s) continue;
+            const name = s.state.name.trim();
+            if (name.length === 0) continue;
+            out.push({ name });
+        }
+        return out;
     }
 
     /**
@@ -382,9 +416,19 @@ export class SessionManager {
         this.activeChangedListeners.add(l);
         return () => this.activeChangedListeners.delete(l);
     }
+    /** Subscribe to "persisted shape changed" events — fires on add /
+     *  remove / rename only, never on transient state churn. */
+    onPersistedChanged(l: () => void): Unsubscribe {
+        this.persistedChangedListeners.add(l);
+        return () => this.persistedChangedListeners.delete(l);
+    }
 
     private emitUpdated(s: Session): void {
         for (const l of this.updatedListeners) l(s);
+    }
+
+    private emitPersistedChanged(): void {
+        for (const l of this.persistedChangedListeners) l();
     }
 
     /**

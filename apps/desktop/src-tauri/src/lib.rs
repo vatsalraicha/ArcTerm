@@ -317,6 +317,8 @@ pub fn run() {
             ipc::ai_status,
             ipc::settings_get,
             ipc::settings_set,
+            ipc::sessions_get,
+            ipc::sessions_set,
             ipc::model_list,
             ipc::model_download,
             ipc::model_delete,
