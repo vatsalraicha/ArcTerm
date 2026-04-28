@@ -35,6 +35,7 @@ export function writeWelcome(handle: TerminalHandle): void {
         ["⌘T / ⌘W", "New session / close session"],
         ["⌘1 – ⌘9", "Switch to session N"],
         ["↑ / Ctrl+R", "Browse / search command history"],
+        ["⌘⇧F", "Global search — commands + session output"],
         ["→", "Accept history suggestion (ghost text)"],
         ["Tab", "Complete path / subcommand / option"],
         ["⌘,", "Open settings"],
