@@ -39,6 +39,65 @@ pub struct Settings {
     /// in the settings tree as a top-level toggle.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Persisted sidebar sessions. The shape (count + names) the user
+    /// had last time they quit. On boot the frontend recreates one
+    /// session per entry, in this order, so closing + reopening the app
+    /// preserves both how many tabs were open AND any custom names.
+    /// Empty vec = first launch / nothing persisted yet → frontend
+    /// falls back to its single-default-session behavior.
+    #[serde(default)]
+    pub sessions: Vec<PersistedSession>,
+}
+
+/// Per-session state we persist across restarts. Kept deliberately
+/// minimal: PTY ids regenerate every boot, cwd belongs to a live shell
+/// process that no longer exists, and exit codes / running flags are
+/// transient. Only the user-visible name is stable enough — and useful
+/// enough — to restore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedSession {
+    /// Sidebar label. Truncated to MAX_SESSION_NAME_BYTES on save so a
+    /// poisoned config.json can't allocate gigabytes when we reload.
+    pub name: String,
+}
+
+/// Hard caps on the persisted-sessions list so a malformed or hostile
+/// config.json can't blow up boot. 64 is several times any realistic
+/// open-tab count; the per-name 256-byte cap leaves room for unicode
+/// labels while staying well under any UI sanity bound.
+pub const MAX_PERSISTED_SESSIONS: usize = 64;
+pub const MAX_SESSION_NAME_BYTES: usize = 256;
+
+/// Clamp a sessions list to the documented caps. Truncates the list
+/// length, the per-name byte length (on a UTF-8 char boundary), and
+/// drops empty names. Used both at the IPC boundary (so a renderer
+/// can't smuggle giant payloads through `sessions_set`) and at boot
+/// load (so a hand-edited or hostile config.json can't poison the
+/// in-memory copy). Returns a fresh Vec; never mutates input.
+pub fn sanitize_sessions(input: &[PersistedSession]) -> Vec<PersistedSession> {
+    input
+        .iter()
+        .filter_map(|s| {
+            let name = s.name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            // Byte-length cap respecting char boundaries: walk forward
+            // and stop at the last boundary ≤ MAX_SESSION_NAME_BYTES.
+            let truncated = if name.len() <= MAX_SESSION_NAME_BYTES {
+                name.to_string()
+            } else {
+                let mut end = MAX_SESSION_NAME_BYTES;
+                while !name.is_char_boundary(end) {
+                    end -= 1;
+                }
+                name[..end].to_string()
+            };
+            Some(PersistedSession { name: truncated })
+        })
+        .take(MAX_PERSISTED_SESSIONS)
+        .collect()
 }
 
 impl Default for Settings {
@@ -46,6 +105,7 @@ impl Default for Settings {
         Self {
             ai: AiSettings::default(),
             theme: default_theme(),
+            sessions: Vec::new(),
         }
     }
 }
@@ -190,6 +250,12 @@ impl SettingsStore {
         // clobber disk, so the user can see the old value in the settings
         // panel and decide whether it was intentional.
         let mut final_settings = settings;
+        // Re-clamp the persisted sessions list. We trust our own writer to
+        // emit sanitized values, but the file could have been hand-edited
+        // (or written by a future/older version). Doing the clamp here
+        // means the rest of the app can treat `settings.sessions` as
+        // already-validated.
+        final_settings.sessions = sanitize_sessions(&final_settings.sessions);
         if let Err(e) = validate_claude_path(&final_settings.ai.claude_path) {
             log::warn!(
                 "stored claudePath failed boot revalidation ({e}); \
@@ -409,7 +475,58 @@ unsafe fn libc_geteuid() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_claude_path;
+    use super::{
+        sanitize_sessions, validate_claude_path, PersistedSession, MAX_PERSISTED_SESSIONS,
+        MAX_SESSION_NAME_BYTES,
+    };
+
+    fn p(name: &str) -> PersistedSession {
+        PersistedSession {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn sanitize_drops_empty_names() {
+        let out = sanitize_sessions(&[p(""), p("   "), p("real")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "real");
+    }
+
+    #[test]
+    fn sanitize_truncates_list_length() {
+        let input: Vec<_> = (0..MAX_PERSISTED_SESSIONS + 5)
+            .map(|i| p(&format!("s{i}")))
+            .collect();
+        let out = sanitize_sessions(&input);
+        assert_eq!(out.len(), MAX_PERSISTED_SESSIONS);
+    }
+
+    #[test]
+    fn sanitize_truncates_long_name_on_char_boundary() {
+        // "é" = 2 bytes; cap of 256 bytes means we should keep ≤ 128 chars.
+        let huge = "é".repeat(MAX_SESSION_NAME_BYTES);
+        let out = sanitize_sessions(&[p(&huge)]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].name.len() <= MAX_SESSION_NAME_BYTES);
+        // Result must still be valid UTF-8 (Rust enforces this for &str,
+        // but truncating mid-codepoint would have panicked).
+        assert!(out[0].name.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn sanitize_preserves_order() {
+        let out = sanitize_sessions(&[p("a"), p("b"), p("c")]);
+        let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn sanitize_trims_whitespace() {
+        let out = sanitize_sessions(&[p("  build server  ")]);
+        assert_eq!(out[0].name, "build server");
+    }
+
 
     #[test]
     fn empty_path_allowed() {

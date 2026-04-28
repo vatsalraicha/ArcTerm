@@ -20,7 +20,9 @@ use crate::history::{Entry, HistoryStore};
 use crate::ipc_guard::{self, AuditEntry, AuditLog};
 use crate::models::{self, downloader, ModelInfo};
 use crate::pty::PtyManager;
-use crate::settings::{Settings, SettingsStore};
+use crate::settings::{
+    sanitize_sessions, PersistedSession, Settings, SettingsStore, MAX_PERSISTED_SESSIONS,
+};
 
 // -- PTY commands --------------------------------------------------------
 
@@ -362,6 +364,41 @@ pub fn settings_set(
     // persisting a new path had no effect until process restart.
     claude.inner().set_binary(&settings.ai.claude_path);
     store.inner().set(settings)
+}
+
+// -- Persisted sessions -------------------------------------------------
+//
+// Thin getter/setter for the sidebar session list. The frontend snapshots
+// the visible sessions (count + names, in display order) and persists on
+// any structural change so a relaunch restores the same tabs. Kept
+// separate from `settings_set` because session changes fire an order of
+// magnitude more often than other settings tweaks and we don't want to
+// route them through the claude-path validation path.
+
+#[tauri::command]
+pub fn sessions_get(store: State<'_, std::sync::Arc<SettingsStore>>) -> Vec<PersistedSession> {
+    store.inner().get().sessions
+}
+
+#[tauri::command]
+pub fn sessions_set(
+    store: State<'_, std::sync::Arc<SettingsStore>>,
+    sessions: Vec<PersistedSession>,
+) -> Result<(), String> {
+    // Hard reject obviously-abusive payloads BEFORE we call sanitize, so
+    // a renderer that looped a 10k-entry call gets an error rather than
+    // silently having 9936 entries dropped. The sanitize call still runs
+    // and clamps as a defense-in-depth — both checks must pass for the
+    // write to land.
+    if sessions.len() > MAX_PERSISTED_SESSIONS * 4 {
+        return Err(format!(
+            "sessions list exceeds reasonable bound ({} entries; max ~{})",
+            sessions.len(),
+            MAX_PERSISTED_SESSIONS
+        ));
+    }
+    let cleaned = sanitize_sessions(&sessions);
+    store.inner().update(|s| s.sessions = cleaned)
 }
 
 // -- Models -------------------------------------------------------------

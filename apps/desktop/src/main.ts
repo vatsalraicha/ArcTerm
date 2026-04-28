@@ -518,8 +518,59 @@ async function boot(mounts: Mounts): Promise<void> {
     }
   });
 
-  // --- First session ---------------------------------------------------
-  await manager.create();
+  // --- Persisted-sessions wiring --------------------------------------
+  //
+  // The Rust side stores a list of {name} per tab in config.json. On
+  // boot we recreate that many sessions, in order, with the saved names;
+  // every structural change (add/remove/rename) snapshots the new list
+  // and writes it back. Cwd, branch, exit codes, and the running flag
+  // are intentionally NOT persisted — they belong to a live shell that
+  // no longer exists by the time we'd restore them.
+  //
+  // Why a debounce on the writer? `sessions_set` round-trips through
+  // disk via atomic_write; rapid-fire structural events (e.g. closing
+  // the last 3 tabs in a row before quitting) would otherwise produce
+  // 3 sequential writes of nearly-identical contents. 250 ms is short
+  // enough to feel synchronous to a human and long enough to coalesce.
+  let persistTimer: number | undefined;
+  const persistSessions = () => {
+    if (persistTimer !== undefined) window.clearTimeout(persistTimer);
+    persistTimer = window.setTimeout(() => {
+      persistTimer = undefined;
+      const snapshot = manager.persistedSnapshot();
+      invoke("sessions_set", { sessions: snapshot }).catch((err) =>
+        console.error("sessions_set failed", err),
+      );
+    }, 250);
+  };
+  manager.onPersistedChanged(persistSessions);
+
+  // --- First session(s) -----------------------------------------------
+  let restored: { name: string }[] = [];
+  try {
+    restored = await invoke<{ name: string }[]>("sessions_get");
+  } catch (err) {
+    console.warn("sessions_get failed; starting with default", err);
+  }
+  if (restored.length === 0) {
+    await manager.create();
+  } else {
+    // Serial creation: SessionManager's `createInFlight` guard already
+    // serializes calls, but keeping it explicit makes the intent clear
+    // and surfaces individual failures so one bad PTY spawn doesn't
+    // abort the whole restore.
+    for (const s of restored) {
+      try {
+        await manager.create({ name: s.name });
+      } catch (err) {
+        console.error(`failed to restore session "${s.name}":`, err);
+      }
+    }
+    // If every restore failed we still want a usable terminal.
+    if (manager.list().length === 0) {
+      await manager.create();
+    }
+  }
   // The manager fires `active-changed` during create → renderPromptBar
   // already ran with the new session. Just focus the editor.
   editor.focus();
