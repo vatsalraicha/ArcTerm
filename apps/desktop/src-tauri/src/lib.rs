@@ -304,6 +304,7 @@ pub fn run() {
             ipc::pty_write,
             ipc::pty_resize,
             ipc::pty_kill,
+            ipc::pty_secret_input_state,
             ipc::history_insert,
             ipc::history_update_exit,
             ipc::history_search,

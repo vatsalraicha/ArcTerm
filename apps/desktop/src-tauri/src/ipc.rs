@@ -79,6 +79,35 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
     manager.kill(&id)
 }
 
+/// Is this PTY's child currently reading a secret?
+///
+/// `true` means terminal echo is off *and* the tty is canonical — the
+/// signature of a password read (sudo, ssh, gpg, passwd, `mysql -p`).
+/// Echo alone is not enough: an interactive shell sits at its prompt with
+/// echo already off, because its line editor does the echoing. See
+/// `pty::is_secret_input` for the measurements behind the rule.
+///
+/// The frontend uses this to enter secure-input mode: it tears down the
+/// custom input dock and hands keystrokes straight to the terminal, so the
+/// secret never enters ArcTerm's editor and therefore never reaches
+/// history, ghost-text autosuggest, global search, or an AI prompt.
+///
+/// The reader thread already pushes `pty://secret-input` on every
+/// transition; this synchronous form exists so the frontend can check
+/// before accepting the first keystroke into an empty editor, closing the
+/// window where a fast typist could out-race the event.
+///
+/// Not audit-logged: it is a read-only status probe carrying no payload,
+/// called on a keystroke path where an audit entry per call would flood the
+/// 200-entry ring buffer and evict genuinely interesting events.
+#[tauri::command]
+pub fn pty_secret_input_state(
+    manager: State<'_, PtyManager>,
+    id: String,
+) -> Result<bool, String> {
+    manager.secret_input_state(&id)
+}
+
 // -- History commands ----------------------------------------------------
 //
 // All of these take the HistoryStore state. If the store failed to open

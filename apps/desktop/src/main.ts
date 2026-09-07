@@ -334,6 +334,93 @@ async function boot(mounts: Mounts): Promise<void> {
     closeCompletions: () => completionOverlay.close(),
   });
 
+  // --- Secure input mode ------------------------------------------------
+  //
+  // THE PROBLEM: ArcTerm's input editor is a DOM widget. It renders your
+  // keystrokes locally and only pushes bytes to the PTY on Enter. A real
+  // terminal renders nothing by itself — the tty line discipline echoes.
+  // That is exactly what `sudo` relies on: it clears the terminal ECHO
+  // flag before reading so your password never appears. ArcTerm, knowing
+  // nothing about termios, used to paint the password in plain sight —
+  // and then file it in SQLite history, offer it back as ghost-text
+  // autosuggest, surface it in global search, and ship it to the AI
+  // backend as part of `recent_commands`.
+  //
+  // THE FIX: when the backend reports a secret read in progress, take the
+  // entire input dock away and give the caret to xterm. Keystrokes flow raw
+  // through
+  // `term.onData` -> `pty_write`, which is the path that was always
+  // correct. Note this doesn't *guard* the leak paths — it makes them
+  // structurally unreachable: the bytes never enter the editor, so there
+  // is no `submitCommand` call, hence no history row, no ghost text, no
+  // AI context. Masking the editor instead would have required a
+  // suppression flag threaded through every one of those.
+  let secureActive = false;
+  // Half-typed command rescued when the dock disappears, restored after.
+  let secureStash: string | null = null;
+  // True while a first-keystroke probe is in flight (see the keydown
+  // handler below). If *that* probe is what discovers secure mode, then
+  // whatever is in the editor is the first character of the secret itself
+  // — discard it. Restoring it later would repaint part of the password.
+  let probeInFlight = false;
+
+  const syncSecureMode = (): void => {
+    const active = manager.active;
+    // No active session => nothing is asking for a secret. Also note the
+    // state is read per-session: a background session hitting a password
+    // prompt must not yank the dock away from the one you're looking at.
+    const secure = active ? active.terminal.getSecretInput() : false;
+    if (secure === secureActive) return;
+    secureActive = secure;
+
+    if (secure) {
+      if (probeInFlight) {
+        secureStash = null;
+      } else {
+        const pending = editor.getValue();
+        secureStash = pending.length > 0 ? pending : null;
+      }
+      editor.clear();
+      inputDock.classList.add("secure-hidden");
+      active?.terminal.focus();
+    } else {
+      inputDock.classList.remove("secure-hidden");
+      if (secureStash !== null) {
+        editor.setValue(secureStash);
+        secureStash = null;
+      }
+      editor.focus();
+    }
+  };
+
+  manager.onSessionAdded((s) => {
+    s.terminal.onSecretInputChange(() => syncSecureMode());
+  });
+  manager.onActiveChanged(() => syncSecureMode());
+
+  // Race closer. The backend emits `pty://secret-input` as soon as it sees
+  // the flags change, and sudo sets them *before* printing "Password:", so
+  // in practice the event lands well before you can type. This covers the
+  // pathological case where it doesn't: on the first keystroke into an
+  // empty editor, ask the backend directly. Gated on "editor is empty" so
+  // it costs one IPC per command typed, not one per character.
+  mounts.editorHost.addEventListener(
+    "keydown",
+    () => {
+      if (secureActive) return;
+      if (editor.getValue().length > 0) return;
+      const active = manager.active;
+      if (!active) return;
+      probeInFlight = true;
+      void active.terminal
+        .refreshSecretInput()
+        .finally(() => {
+          probeInFlight = false;
+        });
+    },
+    true,
+  );
+
   // Close the block on command end for the session that emitted it. We
   // subscribe inside the manager at session-create time; here we only
   // need to handle the history row update, the visual block-end write,
