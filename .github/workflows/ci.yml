@@ -114,7 +114,10 @@ jobs:
       # advisory against a crate NOT listed here will fail CI, which is
       # what we want.
       #
-      # Last reviewed: 2026-04-19 against tauri 2.10.3 + llama-cpp-2 0.1.
+      # Last reviewed: 2026-09-07 against tauri 2.10.3 + llama-cpp-2 0.1.
+      # The 2026-09-07 sweep (h2 / quick-xml / quinn-proto / anyhow) needed
+      # NO new entries here -- every advisory was fixable by version bump.
+      # See Package_Vulnerability_Issues.md for the per-advisory triage.
       #
       #   * GTK3 / glib (RUSTSEC-2024-0411..0420, 0429): Linux-only tauri
       #     backend deps. ArcTerm is macOS-only; unreachable from the
