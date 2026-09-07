@@ -7,6 +7,18 @@
  *     #input-area  — sigil + editable area in a single row
  */
 
+/* Secure-input mode: a child process (sudo, ssh, gpg, passwd) has turned
+   terminal echo off because it is reading a secret. We remove the entire
+   input dock — prompt bar included — and hand the caret to xterm, so the
+   secret goes straight to the PTY as raw keystrokes and never enters
+   ArcTerm's editor (and therefore never reaches history, autosuggest,
+   global search, or an AI prompt). `display: none` rather than
+   `visibility: hidden` so the terminal reclaims the space, matching what
+   a plain terminal looks like at a password prompt. */
+#input-dock.secure-hidden {
+  display: none;
+}
+
 #input-dock {
   flex: 0 0 auto;
   display: flex;

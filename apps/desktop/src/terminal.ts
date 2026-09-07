@@ -50,6 +50,7 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 // Matches the Rust event name. Keep these two strings in sync.
 const PTY_DATA_EVENT = "pty://data";
 const PTY_EXIT_EVENT = "pty://exit";
+const PTY_SECRET_EVENT = "pty://secret-input";
 
 interface PtyDataPayload {
   id: string;
@@ -61,6 +62,12 @@ interface PtyDataPayload {
 interface PtyExitPayload {
   id: string;
   code: number | null;
+}
+
+interface PtySecretPayload {
+  id: string;
+  /** `true` = the child is reading a secret (echo off AND canonical mode). */
+  secret: boolean;
 }
 
 export type ThemeName = "dark" | "light";
@@ -88,6 +95,22 @@ export interface TerminalHandle {
   onBranchChange: (cb: (branch: string) => void) => void;
   /** Fires when the shell finishes a command (OSC 133;D;<exit>). */
   onCommandEnd: (cb: (exitCode: number) => void) => void;
+  /**
+   * Fires when the child starts or stops reading a secret (terminal echo
+   * off AND canonical mode — the signature of a password prompt). The
+   * caller should get ArcTerm's custom input UI out of the way; see
+   * main.ts's secure-input handling. Late subscribers get the current
+   * state replayed.
+   */
+  onSecretInputChange: (cb: (secret: boolean) => void) => void;
+  /** Is a secret being read right now? `false` (normal) until told otherwise. */
+  getSecretInput: () => boolean;
+  /**
+   * Ask the backend for the live state and publish any change through
+   * `onSecretInputChange`. Closes the race where a fast typist beats the
+   * `pty://secret-input` event to the first keystroke.
+   */
+  refreshSecretInput: () => Promise<boolean>;
   /** Current known cwd, or null until the shell reports one. */
   getCwd: () => string | null;
   /**
@@ -241,6 +264,17 @@ export async function setupTerminal(
   // command was actually running. Silent-drop on mismatch so a noisy
   // terminal session doesn't spam the user with warnings.
   const commandEndListeners = new Set<(exitCode: number) => void>();
+
+  // Secret-input state. Starts false (nothing is asking for a password);
+  // the backend only reports transitions, so this initial value is
+  // load-bearing — defaulting to true would hide the input dock at boot.
+  const secretListeners = new Set<(secret: boolean) => void>();
+  let secretInput = false;
+  const setSecretInput = (next: boolean): void => {
+    if (next === secretInput) return;
+    secretInput = next;
+    for (const cb of secretListeners) cb(next);
+  };
   // SECURITY (M-3/M-4): deny-by-default. Every 133 subtype must carry a
   // trailing nonce that matches the per-session $ARCTERM_OSC_NONCE via
   // a constant-time compare. An unrecognized subtype or a missing /
@@ -418,6 +452,17 @@ export async function setupTerminal(
     },
   );
 
+  // Secure-input signal. The backend emits only on transitions, so this
+  // fires twice per password prompt (on, then off again) rather than once
+  // per output burst.
+  const unlistenSecret: UnlistenFn = await listen<PtySecretPayload>(
+    PTY_SECRET_EVENT,
+    (event) => {
+      if (event.payload.id !== ptyId) return;
+      setSecretInput(event.payload.secret);
+    },
+  );
+
   // Terminal -> PTY. xterm's onData still fires when the user clicks into
   // the output area and types — useful for TUI programs (vim, htop) where
   // the custom editor doesn't apply. The primary input path in Phase 2 is
@@ -452,6 +497,7 @@ export async function setupTerminal(
   window.addEventListener("beforeunload", () => {
     unlistenData();
     unlistenExit();
+    unlistenSecret();
     invoke("pty_kill", { id: ptyId }).catch(() => {});
   });
 
@@ -478,6 +524,27 @@ export async function setupTerminal(
     },
     onBranchChange: (cb) => branchListeners.add(cb),
     onCommandEnd: (cb) => commandEndListeners.add(cb),
+    onSecretInputChange: (cb) => {
+      secretListeners.add(cb);
+      // Replay current state: a session created while a password prompt is
+      // already open must not come up with its input dock visible.
+      if (secretInput) cb(true);
+    },
+    getSecretInput: () => secretInput,
+    refreshSecretInput: async () => {
+      try {
+        const live = await invoke<boolean>("pty_secret_input_state", {
+          id: ptyId,
+        });
+        setSecretInput(live);
+        return live;
+      } catch {
+        // PTY already gone, or a platform without termios. Report the last
+        // known state rather than guessing — guessing `false` here would be
+        // a fail-open that renders a password.
+        return secretInput;
+      }
+    },
     getCwd: () => currentCwd,
     writeBlockStart: (cwd: string | null, branch: string) => {
       writeBlockStart(term, cwd, branch);
