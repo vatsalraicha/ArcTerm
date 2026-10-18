@@ -39,6 +39,10 @@ jobs:
       # LunarG SDK release the Vulkan backend is compiled against. Keep in
       # sync with ci.yml; the cache key follows it.
       VULKAN_VERSION: "1.4.357.0"
+      # Ninja instead of the Visual Studio generator; see the Windows job
+      # in ci.yml for why (ggml-vulkan's parallel custom build steps break
+      # the shader-generator ExternalProject under MSBuild).
+      CMAKE_GENERATOR: Ninja
 
     steps:
       - name: Checkout
@@ -83,6 +87,20 @@ jobs:
           Add-Content $env:GITHUB_ENV "VULKAN_SDK=$sdk"
           Add-Content $env:GITHUB_PATH "$sdk\Bin"
 
+      # Fail fast, and leave the versions in the log, before the 40-minute
+      # llama.cpp build starts: glslc comes from the SDK Bin exported above,
+      # ninja from the runner image.
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          ninja --version
+          # CMake's default compiler search for the shader-generator
+          # sub-build is cc, gcc, cl, …; a stray gcc/cc on PATH would win
+          # over cl. The VS 2026 image ships none — this line proves it.
+          Get-Command gcc, cc -ErrorAction SilentlyContinue | Select-Object Name, Source
+          glslc --version | Select-Object -First 1
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -92,8 +110,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
-          # Release profile; keep it apart from ci.yml's debug cache.
-          key: windows-x64-release
+          # Release profile; keep it apart from ci.yml's debug cache. The
+          # generator is part of the key for the same reason as there.
+          key: windows-x64-release-ninja
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
