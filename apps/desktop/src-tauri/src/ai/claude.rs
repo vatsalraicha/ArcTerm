@@ -366,7 +366,7 @@ fn base_command(binary: &str) -> Command {
     // `~/Downloads` when the user double-clicks the app bundle. $HOME
     // is the natural fallback; the user's real ~/.claude is what we
     // want this subprocess to honor.
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = crate::home::dir() {
         cmd.current_dir(home);
     }
     cmd.stdin(Stdio::null());

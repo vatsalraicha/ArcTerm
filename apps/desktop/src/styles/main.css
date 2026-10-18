@@ -34,7 +34,7 @@
   /* Warning glow (amber-tinted) for "running" indicators. */
   --warning-glow: rgba(255, 183, 77, 0.2);
 
-  --font-mono: "JetBrains Mono", Menlo, Monaco, "Courier New", monospace;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, Menlo, Monaco, "DejaVu Sans Mono", "Courier New", monospace;
   --sidebar-width: 220px;
 }
 
@@ -71,7 +71,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI", system-ui, sans-serif;
   /* Disable text selection on chrome; xterm + specific widgets opt in. */
   user-select: none;
   -webkit-user-select: none;

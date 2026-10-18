@@ -1,0 +1,81 @@
+# Windows installer build — ArcTerm.
+#
+# Produces the NSIS `.exe` and WiX `.msi` for x64 and attaches them to the
+# workflow run as an artifact. This is how Windows testers get a build
+# while the port lives on `main-windows-x86`: there is no tagged release
+# for it yet, and release.yml only runs on `v*` tags.
+#
+# Triggers: every push to the integration branch and to feat-windows-x86-*
+# feature branches (so a slice can be tried on real hardware before it
+# merges), plus manual dispatch. Concurrency cancels superseded runs, so
+# a burst of pushes costs one build.
+#
+# Not signed. SmartScreen shows "Windows protected your PC" on first run;
+# INSTALL.md documents the More info → Run anyway path, same as the
+# unnotarized macOS build.
+
+name: Windows build
+
+on:
+  push:
+    branches:
+      - main-windows-x86
+      - "feat-windows-x86-*"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build installer (x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # llama-cpp-sys-2 runs bindgen at build time; the runner image ships
+      # LLVM here. Same reason as the Windows job in ci.yml.
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          # Release profile; keep it apart from ci.yml's debug cache.
+          key: windows-x64-release
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      # `tauri build` runs the Vite build (beforeBuildCommand), compiles the
+      # release binary and bundles NSIS + MSI. The tauri CLI downloads NSIS
+      # and WiX on first use.
+      - name: Build + bundle
+        run: pnpm --filter @arcterm/desktop tauri build --target x86_64-pc-windows-msvc
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcTerm-windows-x64
+          if-no-files-found: error
+          path: |
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi

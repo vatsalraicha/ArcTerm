@@ -17,7 +17,6 @@
 //! ranking formula is enough for tens of thousands of entries and avoids
 //! pulling in the FTS5 extension.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -45,9 +44,7 @@ pub struct Entry {
 impl HistoryStore {
     /// Open (or create) the database at `~/.arcterm/history.db`.
     pub fn open() -> Result<Self, String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME not set".to_string())?;
+        let home = crate::home::dir().ok_or_else(|| crate::home::MISSING.to_string())?;
         let dir = home.join(".arcterm");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create {}: {e}", dir.display()))?;

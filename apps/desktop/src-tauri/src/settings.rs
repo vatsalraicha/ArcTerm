@@ -187,9 +187,7 @@ pub struct SettingsStore {
 impl SettingsStore {
     /// Open (or create) the settings file at `~/.arcterm/config.json`.
     pub fn open() -> Result<Self, String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME not set".to_string())?;
+        let home = crate::home::dir().ok_or_else(|| crate::home::MISSING.to_string())?;
         let dir = home.join(".arcterm");
         fs::create_dir_all(&dir)
             .map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -462,15 +460,14 @@ pub fn validate_claude_path(path: &str) -> Result<(), String> {
 
 // Direct FFI into geteuid. We avoid importing a whole libc crate — it's
 // in the dep tree transitively but not directly, and this is the only
-// call site.
+// call site. Unix-only on purpose: the single caller sits inside the
+// `#[cfg(unix)]` block of `validate_claude_path`, so a non-unix stub here
+// would be dead code (clippy -D warnings rejects it on Windows). Windows
+// has no uid concept; ownership checks there are a follow-up.
 #[cfg(unix)]
 extern "C" {
     #[link_name = "geteuid"]
     fn libc_geteuid() -> u32;
-}
-#[cfg(not(unix))]
-unsafe fn libc_geteuid() -> u32 {
-    0
 }
 
 #[cfg(test)]

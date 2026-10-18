@@ -6,6 +6,8 @@ Three ways to get ArcTerm running, ordered easiest → most involved.
 2. [Build from source, quick](#build-from-source-quick) — for testing a branch.
 3. [Full dev setup](#full-dev-setup-contributing) — iterate on the code.
 
+Windows testers: see [Windows (alpha)](#windows-alpha).
+
 At the end: [optional AI setup](#optional-ai-setup) and [troubleshooting](#troubleshooting).
 
 ---
@@ -26,6 +28,56 @@ Bypass it:
 
 - Right-click (or ⌃-click) `ArcTerm.app` in Finder → **Open** → confirm.
 - After you do this once, subsequent launches open normally.
+
+---
+
+## Windows (alpha)
+
+Windows x64 support lives on the `main-windows-x86` branch while it
+stabilises. There is no release download yet; installers come out of the
+**Windows build** GitHub Actions workflow.
+
+1. Open [Actions → Windows build](https://github.com/vatsalraicha/ArcTerm/actions/workflows/build-windows.yml),
+   pick the newest green run, and download the `ArcTerm-windows-x64`
+   artifact (you need to be signed in to GitHub to download artifacts).
+2. Unzip it and run `ArcTerm_X.Y.Z_x64-setup.exe`. It installs for the
+   current user only, so there is no admin prompt. The `.msi` in the same
+   zip is equivalent.
+3. SmartScreen will say *"Windows protected your PC"* because the binary
+   is unsigned — the same situation as the unnotarized macOS build. Click
+   **More info → Run anyway**.
+
+What to expect in this alpha:
+
+- **Shell.** PowerShell 7 (`pwsh`) if installed, otherwise the Windows
+  PowerShell 5.1 that ships with Windows. A `SHELL` environment variable,
+  if set, wins (Git Bash users). cmd.exe is not integrated: no blocks, no
+  exit codes.
+- **Shortcuts.** `Ctrl+Shift+K` (AI command), `Ctrl+Shift+E` (explain),
+  `Ctrl+Shift+T` / `Ctrl+Shift+W` (new / close session), `Alt+1`–`Alt+9`
+  (switch session), `Ctrl+Tab` / `Ctrl+Shift+Tab` (next / previous),
+  `Ctrl+Shift+F` (global search), `Ctrl+,` (settings).
+- **Claude backend.** Install Claude Code natively
+  (`irm https://claude.ai/install.ps1 | iex`); ArcTerm finds `claude.exe`
+  on `PATH`. The npm `claude.cmd` shim is not picked up — point *Settings →
+  Claude path* at the `.exe` if you installed through npm.
+- **Local Gemma.** Downloads and runs, CPU-only — no Vulkan or CUDA yet.
+  Expect it to be slow on a laptop; Claude mode is the better default
+  there until GPU backends land.
+- **Known gap: password prompts.** On macOS ArcTerm notices when a program
+  reads a password and hides its input editor. Windows ConPTY offers no
+  equivalent signal, so on Windows a password typed into the ArcTerm input
+  line (for `ssh`, `gsudo`, `git` over HTTPS …) is visible and is saved to
+  command history like any other command. Until that is solved, click into
+  the terminal output area and type the password there — that path
+  bypasses the editor and history entirely.
+- **Block boundaries.** Exit codes and block separators rely on ConPTY
+  passing OSC sequences through in order. Older Windows 10 builds re-render
+  output and may close blocks early or late. If you see that, please report
+  it together with your `winver` output.
+
+Config, history and models live under `%USERPROFILE%\.arcterm\`, the
+same layout as `~/.arcterm/` on macOS.
 
 ---
 
