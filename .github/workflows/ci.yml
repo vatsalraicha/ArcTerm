@@ -1,12 +1,9 @@
 # Continuous integration for ArcTerm.
 #
-# Runs on every push to main and every PR. Single-platform (macOS) because
-# that's our only officially-supported target — `llama-cpp-2`'s Metal
-# feature is macOS-only, and cross-platform Tauri builds introduce enough
-# platform-specific quirks (webkit2gtk on Linux, webview2 on Windows)
-# that supporting them would double our CI surface for no user benefit
-# today. Linux / Windows users are welcome to fork and add their own
-# workflows; the Rust + TS code itself is portable.
+# Runs on every push to main and every PR, plus the platform integration
+# branches (main-windows-x86, …). Two jobs: macOS, the shipping target,
+# with cargo-audit; and Windows x64, in alpha. Linux is not built yet —
+# see CLAUDE.md "Platform branches" for the plan and the branch naming.
 #
 # What this verifies:
 #   * Rust compiles (`cargo check`)
@@ -22,9 +19,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, main-windows-x86]
   pull_request:
-    branches: [main]
+    branches: [main, main-windows-x86]
 
 # Cancel superseded runs so a rapid-fire push only uses one runner-slot.
 # Keeps our free GH Actions minutes from piling up on no-op commits.
@@ -114,8 +111,10 @@ jobs:
       # advisory against a crate NOT listed here will fail CI, which is
       # what we want.
       #
-      # Last reviewed: 2026-09-07 against tauri 2.10.3 + llama-cpp-2 0.1.
-      # The 2026-09-07 sweep (h2 / quick-xml / quinn-proto / anyhow) needed
+      # Last reviewed: 2026-10-18 against tauri 2.10.3 + llama-cpp-2 0.1.
+      # The 2026-09-07 sweep (h2 / quick-xml / quinn-proto / anyhow) and
+      # the 2026-10-18 sweep (quinn-proto 0.11.19, rustls 0.23.46 — seven
+      # advisories, RUSTSEC-2026-0285/0338/0340/0343/0346/0348/0349) needed
       # NO new entries here -- every advisory was fixable by version bump.
       # See Package_Vulnerability_Issues.md for the per-advisory triage.
       #
@@ -158,3 +157,150 @@ jobs:
           --ignore RUSTSEC-2025-0098
           --ignore RUSTSEC-2025-0100
           --ignore RUSTSEC-2026-0097
+
+  # Windows x64. Mirrors the macOS job minus cargo-audit: the advisory
+  # list is identical (same Cargo.lock) and one scan per push is enough.
+  # A cold-cache run is long (45 min and up) because llama-cpp-sys-2
+  # builds llama.cpp with MSVC — every CPU-ISA variant of ggml-cpu plus
+  # the Vulkan backend with its shader compile — and runs bindgen, which
+  # needs libclang (the runner image ships LLVM under C:\Program
+  # Files\LLVM). Warm runs take a few minutes.
+  check-windows:
+    name: Check (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      # LunarG SDK release the Vulkan backend is compiled against. Keep in
+      # sync with build-windows.yml; the cache key follows it.
+      VULKAN_VERSION: "1.4.357.0"
+      # Build llama.cpp with Ninja instead of the Visual Studio generator
+      # cmake-rs would pick. ggml-vulkan opts its custom build steps into
+      # parallel execution (CMP0147 NEW), and under MSBuild that runs the
+      # vulkan-shaders-gen ExternalProject's mkdir/configure/install steps
+      # concurrently: the sub-build's configure fails with "No
+      # CMAKE_C_COMPILER could be found" and the install step with "Not a
+      # file: …/cmake_install.cmake". Ninja orders them by their stamp
+      # files. cmake-rs honours this variable, locates cl.exe through the
+      # cc crate and passes the MSVC environment to the cmake process, so
+      # no vcvars shell is needed; the runner image ships Ninja. Upstream
+      # llama.cpp builds with Ninja on the same VS 2026 image for the
+      # same reason.
+      CMAKE_GENERATOR: Ninja
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # MSVC's compiler front-end (c1) still enforces MAX_PATH (260) on
+      # source paths. The Vulkan shader generator is an ExternalProject
+      # nested under <target>\<triple>\release\build\llama-cpp-sys-2-<hash>\
+      # out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\…, and its
+      # try-compile source sits at 264 characters from the default target
+      # directory ("Cannot open source file: … testCCompiler.c"). A
+      # junction on the workspace drive (D:\t) takes 45 characters off
+      # every build path, while rust-cache and the artifact globs keep
+      # using the real apps/desktop/src-tauri/target directory behind it.
+      - name: Short target path
+        shell: pwsh
+        run: |
+          $real = Join-Path $env:GITHUB_WORKSPACE "apps\desktop\src-tauri\target"
+          New-Item -ItemType Directory -Force $real | Out-Null
+          $link = Join-Path (Split-Path -Qualifier $env:GITHUB_WORKSPACE) "t"
+          New-Item -ItemType Junction -Path $link -Target $real | Out-Null
+          Add-Content $env:GITHUB_ENV "CARGO_TARGET_DIR=$link"
+          "CARGO_TARGET_DIR=$link -> $real"
+
+      # ggml-vulkan needs the LunarG SDK at build time (Vulkan headers,
+      # vulkan-1.lib for the import, glslc for the shader compile). The
+      # installed tree is cached by version; a miss costs a ~290 MB
+      # download plus a two-minute silent install. Save happens right
+      # after the install rather than in a post step so a red build
+      # still warms the cache for the next attempt.
+      - name: Restore Vulkan SDK
+        id: vulkan-sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "VulkanSDK-Installer.exe"
+          curl.exe -sSfL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait -NoNewWindow
+
+      - name: Save Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      # llama-cpp-sys-2's build script reads VULKAN_SDK for the import
+      # library; CMake's FindVulkan reads the same variable; glslc comes
+      # from Bin.
+      - name: Export Vulkan SDK location
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path "$sdk\Lib\vulkan-1.lib")) { throw "Vulkan SDK not found at $sdk" }
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$sdk"
+          Add-Content $env:GITHUB_PATH "$sdk\Bin"
+
+      # Fail fast, and leave the versions in the log, before the 40-minute
+      # llama.cpp build starts: glslc comes from the SDK Bin exported above,
+      # ninja from the runner image.
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          ninja --version
+          # CMake's default compiler search for the shader-generator
+          # sub-build is cc, gcc, cl, …; a stray gcc/cc on PATH would win
+          # over cl. The VS 2026 image ships none — this line proves it.
+          Get-Command gcc, cc -ErrorAction SilentlyContinue | Select-Object Name, Source
+          glslc --version | Select-Object -First 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          # Generator in the key: a build tree configured for Visual Studio
+          # cannot be reconfigured for Ninja (CMake refuses), so flipping
+          # CMAKE_GENERATOR must start from an empty cache.
+          key: windows-x64-ninja
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm --filter @arcterm/desktop vite:build
+
+      - name: Cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --all-targets
+
+      - name: Cargo clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test

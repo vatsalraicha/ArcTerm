@@ -282,6 +282,13 @@ const RISK_PATTERNS: RiskPattern[] = [
     { re: /\bgit\s+(push|reset|clean)\s+.*(--force|-f\b|--hard)/i, reason: "destructive git flag" },
     { re: /\bnpm\s+(unpublish|publish)\b/, reason: "npm publish/unpublish" },
     { re: /\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)/, reason: "docker destructive op" },
+    // PowerShell / cmd spell the same footguns differently. Case-insensitive
+    // because both shells are.
+    { re: /\bRemove-Item\b[^|;&]*-Recurse\b/i, reason: "Remove-Item -Recurse" },
+    { re: /\b(rd|rmdir)\s+(\/[sq]\s+)*\/s\b/i, reason: "rd /s" },
+    { re: /\bdel\s+[^|;&]*\/s\b/i, reason: "del /s" },
+    { re: /^\s*format\s+[a-z]:/i, reason: "format drive" },
+    { re: /\b(Format-Volume|Clear-Disk|Remove-Partition|diskpart)\b/i, reason: "disk destructive op" },
 ];
 
 /**

@@ -146,7 +146,7 @@ async fn download_inner(
 
     let local_path = spec
         .local_path()
-        .ok_or_else(|| "HOME not set".to_string())?;
+        .ok_or_else(|| crate::home::MISSING.to_string())?;
     let dir = local_path
         .parent()
         .ok_or_else(|| "model path has no parent".to_string())?;
@@ -219,11 +219,7 @@ async fn download_inner(
         // SECURITY FIX (H-1): open the existing .part for rehash with
         // O_NOFOLLOW so we don't hash an attacker's link target instead
         // of the bytes we think are on disk.
-        use std::os::unix::fs::OpenOptionsExt;
-        let existing_std = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&part_path)
+        let existing_std = open_nofollow(std::fs::OpenOptions::new().read(true), &part_path, None)
             .map_err(|e| format!("open existing part {}: {e}", part_path.display()))?;
         let mut existing = tokio::fs::File::from_std(existing_std);
         let mut buf = vec![0u8; 64 * 1024];
@@ -286,7 +282,6 @@ async fn download_inner(
     // target. tokio::fs doesn't expose `custom_flags`, so we open
     // synchronously and wrap in `tokio::fs::File::from_std` — the
     // synchronous open is fast and we do it exactly once per download.
-    use std::os::unix::fs::OpenOptionsExt;
     let (mut file, mut downloaded, bytes_total) = if status.as_u16() == 206 {
         // Server honored our Range — open the .part for append, continue.
         let total = resp
@@ -295,10 +290,7 @@ async fn download_inner(
             .and_then(|v| v.to_str().ok())
             .and_then(parse_content_range_total)
             .unwrap_or(spec.size_bytes);
-        let f = std::fs::OpenOptions::new()
-            .append(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&part_path)
+        let f = open_nofollow(std::fs::OpenOptions::new().append(true), &part_path, None)
             .map_err(|e| format!("open for append {}: {e}", part_path.display()))?;
         log::info!(
             "download resume accepted: {} / {} bytes already on disk",
@@ -317,14 +309,15 @@ async fn download_inner(
             hasher = Sha256::new();
         }
         let total = resp.content_length().unwrap_or(spec.size_bytes);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .mode(0o600)
-            .open(&part_path)
-            .map_err(|e| format!("create {}: {e}", part_path.display()))?;
+        let f = open_nofollow(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+            &part_path,
+            Some(0o600),
+        )
+        .map_err(|e| format!("create {}: {e}", part_path.display()))?;
         (tokio::fs::File::from_std(f), 0u64, total)
     } else {
         return Err(format!(
@@ -483,3 +476,30 @@ fn parse_content_range_total(header: &str) -> Option<u64> {
 // Compile-time sanity check: our Path import stays in scope.
 #[allow(dead_code)]
 fn _assert_path_available(_: &Path) {}
+
+/// Open `path` while refusing to follow a symlink at the final component.
+///
+/// On Unix that is `O_NOFOLLOW` (plus `O_CLOEXEC` so the descriptor never
+/// leaks into a spawned shell) — the H-1 fix. Windows has no equivalent in
+/// std's `OpenOptions`, and creating a symlink there needs administrator
+/// rights or Developer Mode, which takes the same-uid attacker H-1 defends
+/// against out of the picture; a plain open is accepted on that platform.
+/// `mode` is the Unix permission bits for a file this call creates and is
+/// ignored elsewhere.
+fn open_nofollow(
+    opts: &mut std::fs::OpenOptions,
+    path: &std::path::Path,
+    mode: Option<u32>,
+) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        if let Some(m) = mode {
+            opts.mode(m);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    opts.open(path)
+}

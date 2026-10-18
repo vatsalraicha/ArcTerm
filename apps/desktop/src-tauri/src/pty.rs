@@ -209,15 +209,12 @@ impl PtyManager {
             })
             .map_err(|e| format!("openpty failed: {e}"))?;
 
-        // Pick the user's preferred shell. $SHELL is the right answer on
-        // login terminals; we fall back to /bin/zsh because that's macOS's
-        // default and the spec's primary target.
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = default_shell();
         let mut cmd = CommandBuilder::new(&shell);
 
         // Start in the user's home so the first prompt is somewhere sane
         // rather than wherever Tauri happened to launch from.
-        if let Some(home) = dirs_home() {
+        if let Some(home) = crate::home::dir() {
             cmd.cwd(home);
         }
 
@@ -250,12 +247,8 @@ impl PtyManager {
             cmd.env("ARCTERM_INTEGRATION_DIR", &paths.integration_dir);
             cmd.env("ARCTERM_SESSION", "1");
 
-            let shell_name = std::path::Path::new(&shell)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            match shell_name {
-                "zsh" => {
+            match shell_kind(&shell) {
+                ShellKind::Zsh => {
                     cmd.env("ZDOTDIR", &paths.zdotdir);
                     // -l = login shell. Matters when ArcTerm is launched
                     // from Finder (or any non-Terminal launcher) because
@@ -270,7 +263,7 @@ impl PtyManager {
                     // We match its convention.
                     cmd.arg("-l");
                 }
-                "bash" => {
+                ShellKind::Bash => {
                     // --rcfile replaces the default rc lookup (~/.bashrc).
                     // Our rcfile chain-loads the user's .bashrc first so
                     // their env is intact. CommandBuilder::arg() is
@@ -282,7 +275,7 @@ impl PtyManager {
                     // where brew shellenv typically lives.
                     cmd.arg("-l");
                 }
-                "fish" => {
+                ShellKind::Fish => {
                     // -l = login shell for fish too (runs config.fish's
                     // login-specific code paths, important for PATH).
                     cmd.arg("-l");
@@ -292,10 +285,23 @@ impl PtyManager {
                     cmd.arg("-C");
                     cmd.arg(format!("source {}", paths.fish_hook.display()));
                 }
-                _ => {
-                    // Unknown shell — we still export the env vars above
-                    // so any curious user can source the hooks manually,
-                    // but we don't try to inject auto-loading.
+                ShellKind::PowerShell => {
+                    // -NoLogo: the copyright banner would otherwise land
+                    // inside the first block. -NoExit: stay interactive
+                    // once the hook has run. The hook travels as
+                    // -EncodedCommand rather than a dot-sourced file; see
+                    // shell_hooks::powershell_encoded_command for why the
+                    // execution policy forces that.
+                    cmd.arg("-NoLogo");
+                    cmd.arg("-NoExit");
+                    cmd.arg("-EncodedCommand");
+                    cmd.arg(shell_hooks::powershell_encoded_command());
+                }
+                ShellKind::Cmd | ShellKind::Other => {
+                    // cmd.exe has no hook points at all, and an unknown
+                    // shell gets no auto-loading — the env vars above are
+                    // still exported so a curious user can source the
+                    // hooks by hand.
                 }
             }
         }
@@ -480,9 +486,104 @@ impl PtyManager {
     }
 }
 
-/// Cross-platform $HOME resolution without pulling in the `dirs` crate.
-fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(std::path::PathBuf::from)
+/// Which integration recipe a shell gets. Derived from the basename of
+/// whatever we are about to exec, so `/opt/homebrew/bin/zsh`,
+/// `C:\\Program Files\\PowerShell\\7\\pwsh.exe` and `PowerShell.EXE` all
+/// classify correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    Zsh,
+    Bash,
+    Fish,
+    /// pwsh (PowerShell 7+) or powershell (Windows PowerShell 5.1). Both
+    /// take the same flags and run the same hook.
+    PowerShell,
+    Cmd,
+    Other,
+}
+
+fn shell_kind(shell: &str) -> ShellKind {
+    // Windows paths arrive with backslashes and an `.exe` suffix in any
+    // letter case; normalise before matching.
+    let name = shell.rsplit(['/', '\\']).next().unwrap_or(shell).to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    match name {
+        "zsh" => ShellKind::Zsh,
+        "bash" => ShellKind::Bash,
+        "fish" => ShellKind::Fish,
+        "pwsh" | "powershell" => ShellKind::PowerShell,
+        "cmd" => ShellKind::Cmd,
+        _ => ShellKind::Other,
+    }
+}
+
+/// The shell to spawn. $SHELL is the right answer on a login terminal; the
+/// fallback is /bin/zsh because that is macOS's default and the spec's
+/// primary target.
+#[cfg(not(windows))]
+pub(crate) fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+/// Windows has no $SHELL convention, but Git Bash / MSYS users do export
+/// one, so it is honoured when it points at a real file. Otherwise:
+/// PowerShell 7 if installed (its installer puts pwsh.exe on PATH), else
+/// the Windows PowerShell 5.1 every Windows 10/11 ships, else cmd.exe —
+/// which never happens in practice but keeps the spawn path total.
+#[cfg(windows)]
+pub(crate) fn default_shell() -> String {
+    if let Ok(s) = std::env::var("SHELL") {
+        if !s.is_empty() && std::path::Path::new(&s).is_file() {
+            return s;
+        }
+    }
+    if let Some(p) = find_on_path("pwsh.exe") {
+        return p.to_string_lossy().into_owned();
+    }
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let ps51 = std::path::PathBuf::from(system_root)
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    if ps51.is_file() {
+        return ps51.to_string_lossy().into_owned();
+    }
+    "cmd.exe".to_string()
+}
+
+#[cfg(windows)]
+fn find_on_path(exe: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(exe))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(test)]
+mod shell_kind_tests {
+    use super::*;
+
+    #[test]
+    fn posix_shells_by_basename() {
+        assert_eq!(shell_kind("/bin/zsh"), ShellKind::Zsh);
+        assert_eq!(shell_kind("/opt/homebrew/bin/bash"), ShellKind::Bash);
+        assert_eq!(shell_kind("fish"), ShellKind::Fish);
+        assert_eq!(shell_kind("/usr/bin/nu"), ShellKind::Other);
+    }
+
+    #[test]
+    fn windows_paths_and_case_insensitive_exe() {
+        assert_eq!(
+            shell_kind(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            ShellKind::PowerShell
+        );
+        assert_eq!(
+            shell_kind(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            ShellKind::PowerShell
+        );
+        assert_eq!(shell_kind("PowerShell.EXE"), ShellKind::PowerShell);
+        assert_eq!(shell_kind(r"C:\Windows\System32\cmd.exe"), ShellKind::Cmd);
+        // Git Bash exports SHELL with forward slashes.
+        assert_eq!(shell_kind("C:/Program Files/Git/usr/bin/bash.exe"), ShellKind::Bash);
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -188,7 +188,9 @@ export async function setupTerminal(
   initialTheme: ThemeName = "dark",
 ): Promise<TerminalHandle> {
   const term = new Terminal({
-    fontFamily: '"JetBrains Mono", Menlo, Monaco, monospace',
+    // Cascadia Mono / Consolas ship with Windows, DejaVu with most Linux
+    // desktops; without them WebView2 falls back to Courier New.
+    fontFamily: '"JetBrains Mono", "Cascadia Mono", Consolas, Menlo, Monaco, "DejaVu Sans Mono", monospace',
     fontSize: 14,
     cursorBlink: true,
     cursorStyle: "bar",
@@ -790,11 +792,16 @@ function parseOsc7(uri: string): string | null {
   } catch {
     decoded = encodedPath;
   }
+  // Windows shells report `file://localhost/C:/Users/me`: a file:// URL
+  // writes a drive letter as "/C:/". Strip that slash so the cwd we store,
+  // complete against and display is the path the shell actually has.
+  if (/^\/[A-Za-z]:\//.test(decoded)) decoded = decoded.slice(1);
   // SECURITY FIX: validate the decoded cwd before trusting it. A malicious
   // program the user runs could emit OSC 7 with a crafted value that later
   // flows into the history DB, AI prompt context, and filesystem completion.
   // Require absolute path, no NUL bytes, no ANSI escapes, reasonable length.
-  if (!decoded.startsWith("/")) return null;
+  const absolute = decoded.startsWith("/") || /^[A-Za-z]:\//.test(decoded);
+  if (!absolute) return null;
   if (decoded.length > 4096) return null;
   // SECURITY FIX (M-2): reject ALL ASCII control characters (0x00-0x1F
   // and 0x7F) plus Unicode line separators in a cwd. The original set

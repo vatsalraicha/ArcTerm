@@ -1,6 +1,6 @@
 # ArcTerm
 
-> A modern terminal for macOS with built-in AI. Use a free local **Gemma 4**
+> A modern terminal for macOS (Windows in alpha) with built-in AI. Use a free local **Gemma 4**
 > model (Metal-accelerated) or your existing **Claude CLI** subscription —
 > or both, with automatic fallback.
 
@@ -10,12 +10,17 @@ open source, offline-capable, and yours. No login wall, no telemetry,
 no subscription required (unless you want the Claude one).
 
 **License:** Apache-2.0 (code) · CC BY 4.0 (name + icons).
-**Platform:** macOS 11+ (Apple Silicon + Intel).
+**Platform:** macOS 11+ (Apple Silicon + Intel). Windows 10 1809+ / 11 (x64) is in
+alpha on the `main-windows-x86` branch — see [INSTALL.md](INSTALL.md#windows-alpha).
 **Status:** v0.1.0 alpha — feature-complete but rough edges remain.
 
 ---
 
 ## What's in the box
+
+Shortcuts below are the macOS chords. On Windows, `⌘` becomes `Ctrl+Shift`
+(`Ctrl+Shift+K`, `Ctrl+Shift+E`, `Ctrl+Shift+T` …), sessions switch with
+`Alt+1`–`Alt+9`, and settings open with `Ctrl+,`.
 
 **AI features**
 - `⌘K` — ask Claude (or local Gemma) to write a shell command from natural language.
@@ -48,6 +53,7 @@ no subscription required (unless you want the Claude one).
 - macOS 11 (Big Sur) or newer, Apple Silicon or Intel.
 - [Claude CLI](https://claude.com/claude-code) *(optional)* — for the Claude backend.
 - A GPU of your Mac's generation — all Apple Silicon Macs and 2016+ Intel Macs with an eGPU work with Metal acceleration for local Gemma.
+- **Windows (alpha):** Windows 10 1809 or newer, x64. PowerShell 7 recommended (the bundled Windows PowerShell 5.1 works too). Local Gemma runs CPU-only there for now.
 
 ---
 

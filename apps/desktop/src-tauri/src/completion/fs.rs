@@ -124,9 +124,11 @@ pub fn complete(text: &str, cursor_pos: usize, cwd: &Path) -> CompletionResult {
 }
 
 /// Find the token under the cursor. A "token" here is a run of non-
-/// whitespace bytes ending at cursor_pos, with one nuance: a backslash
-/// immediately preceding a whitespace byte ESCAPES it — common in shell
-/// paths-with-spaces (`ABAL\ PaySlips/`). Without this, hitting Tab to
+/// whitespace bytes ending at cursor_pos, with one nuance: the shell's
+/// escape character (backslash, or backtick for PowerShell — see
+/// `ESCAPE_CHAR`) immediately preceding a whitespace byte ESCAPES it —
+/// common in shell paths-with-spaces (`ABAL\ PaySlips/`). Without this,
+/// hitting Tab to
 /// extend an already-completed escaped path would split the token at
 /// the escaped space and try to complete the wrong fragment.
 fn extract_token(text: &str, cursor_pos: usize) -> (usize, &str) {
@@ -143,7 +145,7 @@ fn extract_token(text: &str, cursor_pos: usize) -> (usize, &str) {
             // before it is itself escaped.
             let mut bs = 0usize;
             let mut i = start - 1;
-            while i > 0 && bytes[i - 1] == b'\\' {
+            while i > 0 && bytes[i - 1] == ESCAPE_CHAR as u8 {
                 bs += 1;
                 i -= 1;
             }
@@ -174,7 +176,7 @@ fn shell_unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
-        if c == '\\' {
+        if c == ESCAPE_CHAR {
             // The next char is taken literally. If there's no next char
             // (trailing backslash), the backslash is dropped.
             if let Some(next) = chars.next() {
@@ -190,7 +192,7 @@ fn shell_unescape(s: &str) -> String {
 /// Split a token like `path/to/fi` into (`path/to`, `fi`). For a bare token
 /// with no slashes it's ("", token).
 fn split_dir_base(token: &str) -> (String, &str) {
-    match token.rfind('/') {
+    match token.rfind(PATH_SEPARATORS) {
         Some(i) => (token[..=i].to_string(), &token[i + 1..]),
         None => (String::new(), token),
     }
@@ -206,12 +208,12 @@ fn resolve_dir(dir_part: &str, cwd: &Path) -> PathBuf {
     // Tilde expansion. We only handle bare `~` and `~/foo` — `~user/foo`
     // (other users' homes) is rare and requires passwd lookup; skip.
     if let Some(rest) = dir_part.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
+        if let Some(home) = crate::home::dir() {
+            return home.join(rest);
         }
     } else if dir_part == "~" || dir_part == "~/" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
+        if let Some(home) = crate::home::dir() {
+            return home;
         }
     }
     let p = PathBuf::from(dir_part);
@@ -325,17 +327,51 @@ fn is_executable(_meta: &fs::Metadata) -> bool {
 fn shell_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if matches!(
-            c,
-            ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '*' | '?'
-            | '[' | ']' | '(' | ')' | '{' | '}' | '$' | '`'
-            | '|' | '&' | ';' | '<' | '>' | '#' | '!'
-        ) {
-            out.push('\\');
+        if needs_escape(c) {
+            out.push(ESCAPE_CHAR);
         }
         out.push(c);
     }
     out
+}
+
+/// Characters that end a directory component in a typed token. POSIX
+/// shells only know `/`; on Windows users type `C:\Users\` as often as
+/// `C:/Users/` and PowerShell accepts both, so both must split.
+#[cfg(windows)]
+const PATH_SEPARATORS: &[char] = &['/', '\\'];
+#[cfg(not(windows))]
+const PATH_SEPARATORS: &[char] = &['/'];
+
+/// The character the target shell uses to make the next one literal:
+/// backslash for POSIX shells, backtick for PowerShell. Backslash is a
+/// path separator on Windows, so there it is neither escaped nor used as
+/// the escape.
+#[cfg(windows)]
+const ESCAPE_CHAR: char = '`';
+#[cfg(not(windows))]
+const ESCAPE_CHAR: char = '\\';
+
+#[cfg(not(windows))]
+fn needs_escape(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '*' | '?'
+        | '[' | ']' | '(' | ')' | '{' | '}' | '$' | '`'
+        | '|' | '&' | ';' | '<' | '>' | '#' | '!'
+    )
+}
+
+/// PowerShell's bare-word metacharacters. `*` and `?` stay literal in a
+/// path argument there (wildcards are expanded by cmdlets, not the
+/// parser) and `!` means nothing special.
+#[cfg(windows)]
+fn needs_escape(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '\t' | '\n' | '"' | '\'' | '`' | '(' | ')' | '{' | '}'
+        | '[' | ']' | '$' | '|' | '&' | ';' | '<' | '>' | '#' | ',' | '@'
+    )
 }
 
 fn join_preserving_style(dir_part: &str, entry_replacement: &str) -> String {

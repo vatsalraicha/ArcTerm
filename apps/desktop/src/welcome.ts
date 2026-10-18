@@ -12,6 +12,7 @@
  * feels like a README crowbarred into the terminal.
  */
 
+import { shortcutLabels } from "./platform";
 import type { TerminalHandle } from "./terminal";
 
 /**
@@ -29,16 +30,16 @@ export function writeWelcome(handle: TerminalHandle): void {
     const banner = `${BOLD}${ACCENT}ArcTerm${RESET} ${DIM}— AI-powered terminal${RESET}`;
 
     const rows: Array<[string, string]> = [
-        ["⌘K", "Ask AI to write a command"],
+        [shortcutLabels.aiCommand, "Ask AI to write a command"],
         ["? <query>", "AI shortcut — type in the input, hit Enter"],
-        ["⌘⇧E", "Explain the last error (or current input)"],
-        ["⌘T / ⌘W", "New session / close session"],
-        ["⌘1 – ⌘9", "Switch to session N"],
+        [shortcutLabels.aiExplain, "Explain the last error (or current input)"],
+        [shortcutLabels.newClose, "New session / close session"],
+        [shortcutLabels.switch, "Switch to session N"],
         ["↑ / Ctrl+R", "Browse / search command history"],
-        ["⌘⇧F", "Global search — commands + session output"],
+        [shortcutLabels.globalSearch, "Global search — commands + session output"],
         ["→", "Accept history suggestion (ghost text)"],
         ["Tab", "Complete path / subcommand / option"],
-        ["⌘,", "Open settings"],
+        [shortcutLabels.settings, "Open settings"],
         ["/arcterm-help", "List ArcTerm slash-commands"],
     ];
 

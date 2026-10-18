@@ -5,6 +5,7 @@
 pub mod ai;
 pub mod completion;
 pub mod history;
+pub mod home;
 pub mod ipc;
 pub mod ipc_guard;
 pub mod models;
@@ -206,8 +207,11 @@ pub fn run() {
                 .short_version(Some(env!("CARGO_PKG_VERSION")))
                 .build();
 
+            // "CmdOrCtrl" reads as ⌘, on macOS and Ctrl+, elsewhere. A
+            // literal "Cmd" maps to the Super/Win key off macOS, which the
+            // OS mostly swallows before the app sees it.
             let settings_item = MenuItemBuilder::with_id("arcterm:settings", "Settings…")
-                .accelerator("Cmd+,")
+                .accelerator("CmdOrCtrl+,")
                 .build(handle)?;
 
             let app_menu = SubmenuBuilder::new(handle, "ArcTerm")
@@ -218,13 +222,20 @@ pub fn run() {
                 )?)
                 .separator()
                 .item(&settings_item)
-                .separator()
+                .separator();
+            // Services / Hide / Hide Others / Show All are macOS app-menu
+            // conventions; tauri documents them as unsupported on Windows
+            // and Linux, so they are left out there rather than shipped as
+            // dead entries.
+            #[cfg(target_os = "macos")]
+            let app_menu = app_menu
                 .item(&PredefinedMenuItem::services(handle, None)?)
                 .separator()
                 .item(&PredefinedMenuItem::hide(handle, None)?)
                 .item(&PredefinedMenuItem::hide_others(handle, None)?)
                 .item(&PredefinedMenuItem::show_all(handle, None)?)
-                .separator()
+                .separator();
+            let app_menu = app_menu
                 .item(&PredefinedMenuItem::quit(handle, None)?)
                 .build()?;
 
@@ -232,10 +243,15 @@ pub fn run() {
             // menu entries. WebKit handles these inside the editor
             // without the menu too, but having them visible is a macOS
             // convention users expect.
-            let edit_menu = SubmenuBuilder::new(handle, "Edit")
+            let edit_menu = SubmenuBuilder::new(handle, "Edit");
+            // Undo / redo are macOS-only predefined items (same tauri
+            // caveat as above); WebView2 handles Ctrl+Z / Ctrl+Y natively.
+            #[cfg(target_os = "macos")]
+            let edit_menu = edit_menu
                 .item(&PredefinedMenuItem::undo(handle, None)?)
                 .item(&PredefinedMenuItem::redo(handle, None)?)
-                .separator()
+                .separator();
+            let edit_menu = edit_menu
                 .item(&PredefinedMenuItem::cut(handle, None)?)
                 .item(&PredefinedMenuItem::copy(handle, None)?)
                 .item(&PredefinedMenuItem::paste(handle, None)?)

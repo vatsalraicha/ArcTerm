@@ -68,10 +68,10 @@ gitignored — both are reference notes, not published.
 | PTY | portable-pty (Rust) | Cross-platform; one thread per PTY |
 | Storage | rusqlite (bundled) | Command history, WAL mode |
 | Async | tokio | Subprocess (Claude CLI) + streaming inference |
-| Local LLM | llama-cpp-2 0.1 with `metal` | Apple Silicon GPU; auto-enabled on aarch64-darwin |
+| Local LLM | llama-cpp-2 0.1.160: `metal` on macOS, `vulkan` + `dynamic-backends` on Windows | Apple Silicon GPU via Metal; on Windows every ggml backend is a DLL loaded at runtime, Vulkan included |
 | HTTP | reqwest (rustls) | Model downloader, streaming + Range resume |
 | Package mgmt | pnpm workspaces | `pnpm install` at repo root |
-| Target | **macOS only** | Linux/Windows explicitly scoped out for alpha |
+| Target | **macOS** (shipping) · **Windows x64** (alpha, `main-windows-x86`) | Linux + Windows ARM next; see "Platform branches" below |
 
 Not used: React/Vue/Svelte, Electron, Python (original spec suggested a
 Python sidecar; dropped in favor of Rust subprocess calls).
@@ -93,7 +93,8 @@ ArcTerm/
 ├── SECURITY.md                     private disclosure policy (GitHub advisories)
 ├── .github/
 │   ├── workflows/
-│   │   ├── ci.yml                  check on push + PR (cargo check/clippy/test + vite)
+│   │   ├── ci.yml                  check on push + PR (macOS + Windows x64 jobs)
+│   │   ├── build-windows.yml       NSIS/MSI artifact on push to main-windows-x86 (+ manual)
 │   │   └── release.yml             on v* tag: build .app + .dmg, attach to draft release
 │   └── ISSUE_TEMPLATE/
 │       ├── bug_report.yml          structured YAML form: version, macOS, chip, repro
@@ -116,11 +117,13 @@ ArcTerm/
 │       │   ├── history-overlay.ts  ↑ / Ctrl+R searchable overlay
 │       │   ├── completion-overlay.ts  Tab dropdown
 │       │   ├── welcome.ts          per-session keyboard cheatsheet
+│       │   ├── platform.ts         per-OS shortcut chords + labels (⌘ on macOS, Ctrl+Shift elsewhere)
 │       │   └── styles/             one CSS file per component; tokens in main.css
 │       └── src-tauri/
 │           ├── Cargo.toml
 │           ├── tauri.conf.json
-│           ├── build.rs
+│           ├── tauri.windows.conf.json  Windows-only merge: ships gen/ggml-runtime/*.dll next to the exe
+│           ├── build.rs            tauri codegen; on Windows stages the ggml/llama DLLs first
 │           ├── icons/              generated from icons/source.png by `tauri icon`
 │           ├── completion-specs/   bundle.json = 617 Fig specs
 │           ├── capabilities/default.json
@@ -130,7 +133,8 @@ ArcTerm/
 │               ├── pty.rs          PtyManager, reader threads, OSC-passthrough
 │               ├── ipc.rs          every #[tauri::command] handler
 │               ├── history.rs      SQLite history store, autosuggest, search
-│               ├── shell_hooks.rs  zsh ZDOTDIR install + bash rcfile generation
+│               ├── shell_hooks.rs  zsh ZDOTDIR install + bash rcfile + PowerShell -EncodedCommand packaging
+│               ├── home.rs         HOME / USERPROFILE resolution — the one place that knows
 │               ├── settings.rs     ~/.arcterm/config.json, atomic write
 │               ├── models/
 │               │   ├── mod.rs      REGISTRY, cleanup_stranded_parts()
@@ -139,7 +143,7 @@ ArcTerm/
 │               │   ├── mod.rs      AiBackend trait, AiRequest/Response/Chunk
 │               │   ├── context.rs  to_prompt_block + to_compact_prompt_block
 │               │   ├── claude.rs   ClaudeCliBackend (subprocess claude -p)
-│               │   ├── local_llama.rs  LocalLlamaBackend (llama-cpp-2, Metal)
+│               │   ├── local_llama.rs  LocalLlamaBackend (llama-cpp-2; Metal on macOS, Vulkan DLLs on Windows)
 │               │   ├── auto.rs     AutoBackend (Claude → fallback to local)
 │               │   └── router.rs   AiRouter, Mode enum, runtime swap
 │               └── completion/
@@ -150,6 +154,7 @@ ArcTerm/
 │   ├── arcterm.zsh                 prompt suppression, OSC 7/133/1337 emitters
 │   ├── arcterm.bash                bash-preexec-style hooks
 │   ├── arcterm.fish                native fish events
+│   ├── arcterm.ps1                 PowerShell: prompt + PSConsoleHostReadLine hooks (Windows)
 │   └── zdotdir/{.zshenv,.zshrc}    chain-load user rc files, source arcterm.zsh
 ├── pnpm-workspace.yaml             apps/* + packages/*
 ├── package.json                    workspace root
@@ -303,7 +308,17 @@ rename).
 - Prompt is blanked (`PROMPT=''`) so ArcTerm draws the whole UI.
 - bash + fish equivalents exist (`arcterm.bash`, `arcterm.fish`) but
   user has only exercised zsh in practice. pty.rs dispatches on the
-  shell basename.
+  shell basename (`shell_kind()`, case-insensitive, `.exe`-aware).
+- **PowerShell** (`arcterm.ps1`, Windows): no preexec/precmd/chpwd
+  hooks exist, so `prompt` plays precmd (emits `133;D`, branch, cwd-if-
+  changed) and an override of `PSConsoleHostReadLine` plays preexec
+  (emits `133;C` after PSReadLine returns the line). The script is NOT
+  dot-sourced — PowerShell's execution policy blocks `.ps1` files on a
+  stock Windows client — it is passed whole via `pwsh -NoLogo -NoExit
+  -EncodedCommand` (base64 of UTF-16LE, comment lines stripped;
+  `shell_hooks::powershell_encoded_command`). Shell pick on Windows:
+  `$SHELL` if set and exists → `pwsh.exe` on PATH → Windows PowerShell
+  5.1 → `cmd.exe` (no integration).
 
 ---
 
@@ -371,7 +386,13 @@ frontend writes the command manually via `writeRaw` after the pill
 
 ## CI / release
 
-- **`ci.yml`** — runs on every push to main + every PR. macOS only.
+- **`ci.yml`** — runs on every push to main / main-windows-x86 + every
+  PR. macOS job (with cargo-audit) and a Windows x64 job (`windows-latest`,
+  `LIBCLANG_PATH` set for llama-cpp-sys-2's bindgen).
+- **`build-windows.yml`** — on push to `main-windows-x86` or manual
+  dispatch: `tauri build --target x86_64-pc-windows-msvc`, uploads the
+  NSIS `.exe` + `.msi` as the `ArcTerm-windows-x64` artifact. This is how
+  Windows testers get builds until there is a tagged Windows release.
   `cargo check`, `cargo clippy -D warnings`, `cargo test` (incl.
   `--doc`), `pnpm vite:build`. Concurrency cancellation to avoid
   wasting runner time on superseded pushes.
@@ -546,8 +567,8 @@ every open-source Mac project in the world does the same thing.
 - **`⌘⏎` agent conversation mode** → v1.1 feature
 - **Notarized distribution** → when there's a funding model
 - **Regen-from-source CI for bundle.json** → Fig is dead; not useful
-- **Linux / Windows ports** → macOS-only alpha was intentional;
-  reopen if real demand surfaces post-beta
+- **Linux + Windows ARM ports** → after the Windows x64 alpha proves
+  out on real hardware; see "Platform branches" below
 
 ### After beta
 Phase 6 (VS Code extension) — shared TypeScript core in a webview
@@ -556,6 +577,78 @@ subprocess approach. Meaningful rewrite for another environment,
 best tackled as its own milestone after the desktop v1.0 is stable.
 
 ---
+
+## Platform branches (Windows / Linux ports)
+
+Decided 2026-10-18. Each non-macOS platform gets its own integration
+branch; `main` stays the macOS line until a platform is good enough to
+merge.
+
+| Branch | Purpose |
+|---|---|
+| `main-windows-x86` | Windows x64 integration (alpha, active) |
+| `main-windows-arm` | Windows ARM64 (not started) |
+| `main-linux-x86` | Linux x86_64 (not started) |
+| `main-linux-arm` | Linux aarch64 (not started) |
+
+Feature branches are prefixed with the platform: `feat-windows-x86-<topic>`,
+PRs target the matching `main-<platform>` branch. Nothing builds on the
+Mac for these targets — GitHub-hosted runners are the compilers
+(`windows-latest`, and later `windows-11-arm`, `ubuntu-24.04`,
+`ubuntu-24.04-arm`); the Mac is for local testing in VMs only.
+
+### Windows x64 status
+First slice (`feat-windows-x86-bootstrap`): `home.rs` (HOME/USERPROFILE), cfg-gated symlink-
+safe opens in the downloader (the only Windows compile break), shell
+detection + PowerShell spawn, `arcterm.ps1`, `platform.ts` keymap
+(Ctrl+Shift+letter, Alt+digit, Ctrl+Tab, Ctrl+,), `CmdOrCtrl` menu
+accelerator with macOS-only predefined items gated, OSC 7 drive-letter
+parsing, Windows font stacks, Windows destructive-command patterns,
+NSIS per-user install, Windows CI job + installer workflow.
+
+Second slice (`feat-windows-x86-vulkan`): local Gemma on the GPU.
+llama-cpp-2 0.1.160 with `vulkan` + `dynamic-backends`, Windows target
+only. Every ggml backend is a DLL next to the executable
+(`arcterm-desktop.exe` — Tauri keeps the Cargo binary name): `llama.dll`,
+`ggml.dll`, `ggml-base.dll`, one `ggml-cpu-<isa>.dll` per x86 level
+(x64 … alderlake; ggml scores them at start-up and loads the best one
+for the running CPU, which replaced the baseline-SSE2 kernels of the
+static build) and `ggml-vulkan.dll`, which loads only when the display
+driver's `vulkan-1.dll` exists — no GPU driver means CPU fallback, not
+a missing-DLL dialog at launch (the trade-off a statically linked
+Vulkan build would have forced). Plumbing: `build.rs` stages the DLLs
+from `DEP_LLAMA_BACKENDS_DIR` into `gen/ggml-runtime/` (gitignored),
+`tauri.windows.conf.json` ships them as bundle resources, and
+`load_dynamic_backends()` in `ai/local_llama.rs` registers them from
+the exe directory before the first `LlamaBackend::init()`. Both Windows
+workflows install the LunarG SDK (`VULKAN_VERSION`, cached by version)
+and build-windows.yml asserts that the exe does not import
+`vulkan-1.dll` and that a silent NSIS install lays the DLLs down.
+`/arcterm-status` prints `GPU: yes (<device> via Vulkan)` or `GPU: no`;
+CPU-only inference pins `n_threads` to the physical core count (macOS
+keeps llama.cpp's default because Metal carries the layers).
+
+Known gaps, in priority order (each is its own follow-up):
+1. **Secure-input mode has no Windows path.** ConPTY exposes no console
+   input mode to the host, so `pty::read_secret_state` returns `None`
+   and the input dock never hides for password prompts. INSTALL.md
+   documents the workaround (type into the xterm area). Candidate fix:
+   prompt-text heuristic + one-key raw mode.
+2. **ConPTY VT ordering.** Inbox ConPTY on older Windows 10 reorders OSC
+   relative to text and front-loads 133 marks. If the laptop test shows
+   blocks closing at the wrong time, bundle `OpenConsole.exe` +
+   `conpty.dll` (MIT, Windows Terminal ≥ 1.22) next to the exe —
+   portable-pty prefers a sideloaded conpty.dll.
+3. cmd.exe has no integration (unreachable in practice: PowerShell 5.1
+   is always present).
+4. `release.yml` has no Windows matrix entry yet; add when the port
+   merges to `main`.
+5. **Capability tiers** (Port_Assessment §4) are still open: nothing
+   gates Local/Auto on RAM or on the GPU probe yet, and a weak CPU-only
+   box can still be told to run E4B Q8.
+
+The feasibility write-up behind all of this is the untracked
+`Port_Assessment_2026-10-18.md` in the repo root (main checkout only).
 
 ## Gotchas for new sessions
 
@@ -579,6 +672,15 @@ best tackled as its own milestone after the desktop v1.0 is stable.
   `rm -rf /Applications/ArcTerm.app && cp -R
   apps/desktop/src-tauri/target/debug/bundle/macos/ArcTerm.app
   /Applications/`.
+- **Homebrew OpenSSL 4 breaks a fresh llama.cpp build** unless CMake is
+  told not to look for it. llama.cpp's vendored cpp-httplib enables HTTPS
+  whenever `find_package(OpenSSL)` succeeds, and that code does not
+  compile against OpenSSL 4's const-returning `X509_get_subject_name`.
+  `apps/desktop/src-tauri/.cargo/config.toml` sets
+  `CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE` (the build script forwards
+  every `CMAKE_*` env var as a define), so this only bites if cargo is
+  run from outside that directory. ArcTerm never uses llama.cpp's HTTP
+  client; model downloads are our own reqwest/rustls code.
 - **macOS icon cache is sticky.** After a new icon, `killall Dock`
   usually works; stubborn cache needs
   `sudo rm -rf /Library/Caches/com.apple.iconservices.store`.

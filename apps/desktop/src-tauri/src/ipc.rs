@@ -719,6 +719,16 @@ pub fn ai_status(
             "quantization": info.quantization,
         })
     });
+    // GPU line for /arcterm-status. Null until a local model is loaded:
+    // llama.cpp only knows which backends exist once `LlamaBackend::init`
+    // has run, and we don't spin the engine up just to answer a status
+    // query.
+    let local_gpu = router.local_backend().map(|b| {
+        serde_json::json!({
+            "offload": b.gpu_offload(),
+            "device": b.gpu_device(),
+        })
+    });
     serde_json::json!({
         "mode": router.current_mode().as_str(),
         "active_id": active.id(),
@@ -726,6 +736,7 @@ pub fn ai_status(
         "local_available": router.local_available(),
         "local_model": local_model,
         "local_loading": loading,
+        "local_gpu": local_gpu,
     })
 }
 

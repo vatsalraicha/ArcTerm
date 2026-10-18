@@ -81,6 +81,12 @@ interface AiStatus {
         display_name: string;
         quantization?: string | null;
     } | null;
+    // Which silicon the loaded model runs on. Null until a local model is
+    // loaded — llama.cpp only enumerates its backends at init time.
+    local_gpu?: {
+        offload: boolean;
+        device: string | null;
+    } | null;
 }
 
 interface ProgressPayload {
@@ -448,6 +454,26 @@ async function cmdStatus(session: Session): Promise<void> {
         `Active:       ${status.active_display_name} (${status.active_id})`,
     );
     writeLine(session, `Local model:  ${formatLocalModel(status)}`);
+    writeLine(session, `GPU:          ${formatGpu(status)}`);
+}
+
+/**
+ * GPU line for /arcterm-status. "yes" means llama.cpp registered a
+ * GPU-class device and offloads the layers to it (Metal on Apple Silicon,
+ * Vulkan on Windows); "no" means CPU inference — on Windows that usually
+ * points at a missing or outdated Vulkan driver. Unknown until a model is
+ * loaded, because the backends are only enumerated at init time.
+ */
+function formatGpu(status: AiStatus): string {
+    const gpu = status.local_gpu;
+    if (!gpu) {
+        return "\x1b[2munknown until a local model is loaded\x1b[0m";
+    }
+    if (!gpu.offload) {
+        return "\x1b[33mno\x1b[0m \x1b[2m(CPU inference)\x1b[0m";
+    }
+    const device = gpu.device ? ` \x1b[2m(${gpu.device})\x1b[0m` : "";
+    return `\x1b[32myes\x1b[0m${device}`;
 }
 
 /**

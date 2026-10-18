@@ -1,0 +1,212 @@
+# Windows installer build — ArcTerm.
+#
+# Produces the NSIS `.exe` and WiX `.msi` for x64 and attaches them to the
+# workflow run as an artifact. This is how Windows testers get a build
+# while the port lives on `main-windows-x86`: there is no tagged release
+# for it yet, and release.yml only runs on `v*` tags.
+#
+# Triggers: every push to the integration branch and to feat-windows-x86-*
+# feature branches (so a slice can be tried on real hardware before it
+# merges), plus manual dispatch. Concurrency cancels superseded runs, so
+# a burst of pushes costs one build.
+#
+# Not signed. SmartScreen shows "Windows protected your PC" on first run;
+# INSTALL.md documents the More info → Run anyway path, same as the
+# unnotarized macOS build.
+
+name: Windows build
+
+on:
+  push:
+    branches:
+      - main-windows-x86
+      - "feat-windows-x86-*"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build installer (x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      # llama-cpp-sys-2 runs bindgen at build time; the runner image ships
+      # LLVM here. Same reason as the Windows job in ci.yml.
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      # LunarG SDK release the Vulkan backend is compiled against. Keep in
+      # sync with ci.yml; the cache key follows it.
+      VULKAN_VERSION: "1.4.357.0"
+      # Ninja instead of the Visual Studio generator; see the Windows job
+      # in ci.yml for why (ggml-vulkan's parallel custom build steps break
+      # the shader-generator ExternalProject under MSBuild).
+      CMAKE_GENERATOR: Ninja
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # MSVC's compiler front-end (c1) still enforces MAX_PATH (260) on
+      # source paths. The Vulkan shader generator is an ExternalProject
+      # nested under <target>\<triple>\release\build\llama-cpp-sys-2-<hash>\
+      # out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\…, and its
+      # try-compile source sits at 264 characters from the default target
+      # directory ("Cannot open source file: … testCCompiler.c"). A
+      # junction on the workspace drive (D:\t) takes 45 characters off
+      # every build path, while rust-cache and the artifact globs keep
+      # using the real apps/desktop/src-tauri/target directory behind it.
+      - name: Short target path
+        shell: pwsh
+        run: |
+          $real = Join-Path $env:GITHUB_WORKSPACE "apps\desktop\src-tauri\target"
+          New-Item -ItemType Directory -Force $real | Out-Null
+          $link = Join-Path (Split-Path -Qualifier $env:GITHUB_WORKSPACE) "t"
+          New-Item -ItemType Junction -Path $link -Target $real | Out-Null
+          Add-Content $env:GITHUB_ENV "CARGO_TARGET_DIR=$link"
+          "CARGO_TARGET_DIR=$link -> $real"
+
+      # ggml-vulkan needs the LunarG SDK at build time (Vulkan headers,
+      # vulkan-1.lib for the import, glslc for the shader compile). The
+      # installed tree is cached by version; a miss costs a ~290 MB
+      # download plus a two-minute silent install. Save happens right
+      # after the install rather than in a post step so a red build
+      # still warms the cache for the next attempt.
+      - name: Restore Vulkan SDK
+        id: vulkan-sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "VulkanSDK-Installer.exe"
+          curl.exe -sSfL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait -NoNewWindow
+
+      - name: Save Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      # llama-cpp-sys-2's build script reads VULKAN_SDK for the import
+      # library; CMake's FindVulkan reads the same variable; glslc comes
+      # from Bin.
+      - name: Export Vulkan SDK location
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path "$sdk\Lib\vulkan-1.lib")) { throw "Vulkan SDK not found at $sdk" }
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$sdk"
+          Add-Content $env:GITHUB_PATH "$sdk\Bin"
+
+      # Fail fast, and leave the versions in the log, before the 40-minute
+      # llama.cpp build starts: glslc comes from the SDK Bin exported above,
+      # ninja from the runner image.
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          ninja --version
+          # CMake's default compiler search for the shader-generator
+          # sub-build is cc, gcc, cl, …; a stray gcc/cc on PATH would win
+          # over cl. The VS 2026 image ships none — this line proves it.
+          Get-Command gcc, cc -ErrorAction SilentlyContinue | Select-Object Name, Source
+          glslc --version | Select-Object -First 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          # Release profile; keep it apart from ci.yml's debug cache. The
+          # generator is part of the key for the same reason as there.
+          key: windows-x64-release-ninja
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      # `tauri build` runs the Vite build (beforeBuildCommand), compiles the
+      # release binary and bundles NSIS + MSI. The tauri CLI downloads NSIS
+      # and WiX on first use.
+      - name: Build + bundle
+        run: pnpm --filter @arcterm/desktop tauri build --target x86_64-pc-windows-msvc
+
+      # The point of dynamic backends is that the executable itself must not
+      # import vulkan-1.dll (a machine without a GPU driver could not start
+      # it otherwise) and must import the shared llama/ggml libraries that
+      # the installer ships. dumpbin comes with MSVC; vswhere locates it.
+      - name: Check exe imports and staged backend DLLs
+        shell: pwsh
+        run: |
+          $release = "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release"
+          $exe = Get-ChildItem $release -Filter *.exe | Where-Object { $_.Name -in @("ArcTerm.exe", "arcterm-desktop.exe") } | Select-Object -First 1
+          if (-not $exe) { throw "no ArcTerm executable under $release" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          $deps = & $dumpbin /NOLOGO /DEPENDENTS $exe.FullName
+          Write-Host "== $($exe.Name) imports =="
+          $deps
+          if ($deps -match "vulkan-1\.dll") { throw "$($exe.Name) imports vulkan-1.dll directly; Vulkan must stay inside ggml-vulkan.dll" }
+          foreach ($dll in "llama.dll", "ggml.dll", "ggml-base.dll") {
+            if (-not ($deps -match [regex]::Escape($dll))) { throw "$($exe.Name) does not import $dll; dynamic linking did not take effect" }
+          }
+          $staged = Get-ChildItem apps/desktop/src-tauri/gen/ggml-runtime -Filter *.dll | Select-Object -ExpandProperty Name
+          Write-Host "== staged runtime DLLs: $($staged -join ', ') =="
+          foreach ($required in "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll") {
+            if ($staged -notcontains $required) { throw "$required missing from gen/ggml-runtime" }
+          }
+          if (-not ($staged | Where-Object { $_ -like "ggml-cpu-*.dll" })) { throw "no ggml-cpu-*.dll variants staged" }
+
+      # Silent per-user install of the NSIS artifact, then make sure the
+      # DLLs actually landed next to the executable. Catches a bundler-side
+      # regression (wrong resource target, dropped glob) without a tester.
+      - name: Smoke-test the installer layout
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS setup.exe produced" }
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+          $installDir = Join-Path $env:LOCALAPPDATA "ArcTerm"
+          if (-not (Test-Path $installDir)) { throw "silent install did not create $installDir" }
+          Write-Host "== $installDir =="
+          Get-ChildItem $installDir | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          # Tauri keeps the Cargo binary name (arcterm-desktop.exe) for the
+          # installed executable; the product name only shows up in the
+          # shortcuts and the installer file name.
+          $exe = @("arcterm-desktop.exe", "ArcTerm.exe") | Where-Object { Test-Path (Join-Path $installDir $_) } | Select-Object -First 1
+          if (-not $exe) { throw "no ArcTerm executable in the installed app" }
+          Write-Host "installed executable: $exe"
+          foreach ($required in "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll") {
+            if (-not (Test-Path (Join-Path $installDir $required))) { throw "$required missing from the installed app" }
+          }
+          if (-not (Get-ChildItem $installDir -Filter "ggml-cpu-*.dll")) { throw "no ggml-cpu-*.dll in the installed app" }
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcTerm-windows-x64
+          if-no-files-found: error
+          path: |
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi

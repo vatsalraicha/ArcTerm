@@ -30,3 +30,14 @@
 [env]
 MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }
 CMAKE_OSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }
+
+# llama-cpp-sys-2 builds llama.cpp with CMake and forwards every CMAKE_*
+# environment variable as a -D define. llama.cpp's vendored cpp-httplib
+# turns on HTTPS support whenever `find_package(OpenSSL)` succeeds, and
+# that code does not compile against OpenSSL 4 (Homebrew's default since
+# autumn 2026: `X509_get_subject_name` became const-returning). ArcTerm
+# never uses llama.cpp's HTTP client — model downloads go through our own
+# reqwest/rustls downloader — so the honest fix is to not look for OpenSSL
+# at all. Same result on every platform, no dependence on what the build
+# machine happens to have installed.
+CMAKE_DISABLE_FIND_PACKAGE_OpenSSL = "TRUE"
