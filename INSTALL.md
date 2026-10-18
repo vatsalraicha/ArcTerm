@@ -61,9 +61,16 @@ What to expect in this alpha:
   (`irm https://claude.ai/install.ps1 | iex`); ArcTerm finds `claude.exe`
   on `PATH`. The npm `claude.cmd` shim is not picked up — point *Settings →
   Claude path* at the `.exe` if you installed through npm.
-- **Local Gemma.** Downloads and runs, CPU-only — no Vulkan or CUDA yet.
-  Expect it to be slow on a laptop; Claude mode is the better default
-  there until GPU backends land.
+- **Local Gemma.** Runs on the GPU through Vulkan. Intel (Arc, Iris Xe),
+  AMD and NVIDIA all ship a Vulkan driver with their display driver, so
+  there is nothing extra to install. Once a model is loaded,
+  `/arcterm-status` prints `GPU: yes (<device> via Vulkan)`; `GPU: no`
+  means llama.cpp found no usable Vulkan device (a VM, a remote-desktop
+  session, or an outdated driver) and fell back to the CPU, which works
+  but is slow on a laptop. The CPU path picks the kernels for your
+  processor at start-up (AVX2 / AVX-512 when available). The `llama.dll`
+  and `ggml*.dll` files the installer places next to `ArcTerm.exe` are
+  required — the model cannot load without them.
 - **Known gap: password prompts.** On macOS ArcTerm notices when a program
   reads a password and hides its input editor. Windows ConPTY offers no
   equivalent signal, so on Windows a password typed into the ArcTerm input

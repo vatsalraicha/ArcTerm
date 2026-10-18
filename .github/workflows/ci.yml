@@ -160,19 +160,63 @@ jobs:
 
   # Windows x64. Mirrors the macOS job minus cargo-audit: the advisory
   # list is identical (same Cargo.lock) and one scan per push is enough.
-  # A cold-cache run is ~30 min because llama-cpp-sys-2 builds llama.cpp
-  # with MSVC and runs bindgen, which needs libclang — the runner image
-  # ships LLVM under C:\Program Files\LLVM. Warm runs take a few minutes.
+  # A cold-cache run is long (45 min and up) because llama-cpp-sys-2
+  # builds llama.cpp with MSVC — every CPU-ISA variant of ggml-cpu plus
+  # the Vulkan backend with its shader compile — and runs bindgen, which
+  # needs libclang (the runner image ships LLVM under C:\Program
+  # Files\LLVM). Warm runs take a few minutes.
   check-windows:
     name: Check (Windows x64)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      # LunarG SDK release the Vulkan backend is compiled against. Keep in
+      # sync with build-windows.yml; the cache key follows it.
+      VULKAN_VERSION: "1.4.357.0"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ggml-vulkan needs the LunarG SDK at build time (Vulkan headers,
+      # vulkan-1.lib for the import, glslc for the shader compile). The
+      # installed tree is cached by version; a miss costs a ~290 MB
+      # download plus a two-minute silent install. Save happens right
+      # after the install rather than in a post step so a red build
+      # still warms the cache for the next attempt.
+      - name: Restore Vulkan SDK
+        id: vulkan-sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "VulkanSDK-Installer.exe"
+          curl.exe -sSfL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait -NoNewWindow
+
+      - name: Save Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      # llama-cpp-sys-2's build script reads VULKAN_SDK for the import
+      # library; CMake's FindVulkan reads the same variable; glslc comes
+      # from Bin.
+      - name: Export Vulkan SDK location
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path "$sdk\Lib\vulkan-1.lib")) { throw "Vulkan SDK not found at $sdk" }
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$sdk"
+          Add-Content $env:GITHUB_PATH "$sdk\Bin"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

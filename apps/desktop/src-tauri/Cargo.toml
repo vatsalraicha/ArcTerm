@@ -56,9 +56,17 @@ async-trait = "0.1"
 futures = "0.3"
 
 # Local inference. Base dependency for every platform; the GPU backend
-# feature is added per target below. Off macOS this is a CPU-only build
-# (no Vulkan / CUDA yet — see CLAUDE.md "Platform branches").
-llama-cpp-2 = { version = "0.1" }
+# feature is added per target below (Metal on macOS, Vulkan on Windows —
+# see CLAUDE.md "Platform branches" for the Windows packaging). 0.1.160 is
+# the first release with `dynamic-backends` + `load_backends_from_path`.
+llama-cpp-2 = { version = "0.1.160" }
+
+# Physical core count for CPU-only local inference (`with_n_threads` in
+# ai/local_llama.rs). llama.cpp's own default is a flat 4 threads; std
+# only exposes the logical count, and SMT siblings slow matmul down
+# rather than speed it up. Falls back to the logical count internally
+# when the physical topology can't be read.
+num_cpus = "1"
 
 # Model downloader. rustls-tls avoids depending on the system OpenSSL
 # install (homebrew/system LibreSSL mismatch is a real pain); "stream"
@@ -90,7 +98,32 @@ libc = "0.2"
 # acceleration. Scoped to macOS: cargo unifies features per target, so
 # Windows and Linux builds never ask llama-cpp-sys-2 for Metal.
 [target.'cfg(target_os = "macos")'.dependencies]
-llama-cpp-2 = { version = "0.1", features = ["metal"] }
+llama-cpp-2 = { version = "0.1.160", features = ["metal"] }
+
+# Windows: Vulkan is the cross-vendor GPU path (Intel Arc / Iris Xe, AMD
+# and NVIDIA all ship a Vulkan ICD with their display driver), and
+# `dynamic-backends` turns every ggml backend into a DLL that is loaded
+# at runtime (`load_dynamic_backends` in ai/local_llama.rs) instead of
+# being linked in. Two reasons that matters more than the extra files:
+#   * ggml-vulkan.dll only loads when the driver's vulkan-1.dll exists,
+#     so a VM or a GPU-less box silently falls back to the CPU instead of
+#     dying at process start with a missing-DLL dialog, which is what a
+#     statically linked Vulkan build would do;
+#   * the CPU backend ships as one DLL per ISA level (x64 … alderlake)
+#     and ggml picks the best one for the running CPU. The static build
+#     only had baseline SSE2 kernels because llama-cpp-sys-2 derives
+#     GGML_AVX2/FMA from Rust target features and the Rust target is
+#     plain x86-64.
+# build.rs stages the DLLs and tauri.windows.conf.json ships them next to
+# the exe. Scoped to Windows the same way the Metal table is.
+[target.'cfg(target_os = "windows")'.dependencies]
+llama-cpp-2 = { version = "0.1.160", features = ["vulkan", "dynamic-backends"] }
+# Direct dependency purely for build.rs: cargo hands a `links` crate's
+# build metadata (here `DEP_LLAMA_BACKENDS_DIR`, where the backend DLLs
+# were installed) only to its *immediate* dependents, and we are
+# otherwise one level removed via llama-cpp-2. Same version, so the lock
+# resolves to the single copy llama-cpp-2 already builds.
+llama-cpp-sys-2 = { version = "0.1.160" }
 
 [features]
 # Tauri v2 expects a `custom-protocol` feature flag for the production build.

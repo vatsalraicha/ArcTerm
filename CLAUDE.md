@@ -68,7 +68,7 @@ gitignored — both are reference notes, not published.
 | PTY | portable-pty (Rust) | Cross-platform; one thread per PTY |
 | Storage | rusqlite (bundled) | Command history, WAL mode |
 | Async | tokio | Subprocess (Claude CLI) + streaming inference |
-| Local LLM | llama-cpp-2 0.1 with `metal` | Apple Silicon GPU; auto-enabled on aarch64-darwin |
+| Local LLM | llama-cpp-2 0.1.160: `metal` on macOS, `vulkan` + `dynamic-backends` on Windows | Apple Silicon GPU via Metal; on Windows every ggml backend is a DLL loaded at runtime, Vulkan included |
 | HTTP | reqwest (rustls) | Model downloader, streaming + Range resume |
 | Package mgmt | pnpm workspaces | `pnpm install` at repo root |
 | Target | **macOS** (shipping) · **Windows x64** (alpha, `main-windows-x86`) | Linux + Windows ARM next; see "Platform branches" below |
@@ -122,7 +122,8 @@ ArcTerm/
 │       └── src-tauri/
 │           ├── Cargo.toml
 │           ├── tauri.conf.json
-│           ├── build.rs
+│           ├── tauri.windows.conf.json  Windows-only merge: ships gen/ggml-runtime/*.dll next to the exe
+│           ├── build.rs            tauri codegen; on Windows stages the ggml/llama DLLs first
 │           ├── icons/              generated from icons/source.png by `tauri icon`
 │           ├── completion-specs/   bundle.json = 617 Fig specs
 │           ├── capabilities/default.json
@@ -142,7 +143,7 @@ ArcTerm/
 │               │   ├── mod.rs      AiBackend trait, AiRequest/Response/Chunk
 │               │   ├── context.rs  to_prompt_block + to_compact_prompt_block
 │               │   ├── claude.rs   ClaudeCliBackend (subprocess claude -p)
-│               │   ├── local_llama.rs  LocalLlamaBackend (llama-cpp-2, Metal)
+│               │   ├── local_llama.rs  LocalLlamaBackend (llama-cpp-2; Metal on macOS, Vulkan DLLs on Windows)
 │               │   ├── auto.rs     AutoBackend (Claude → fallback to local)
 │               │   └── router.rs   AiRouter, Mode enum, runtime swap
 │               └── completion/
@@ -596,14 +597,35 @@ Mac for these targets — GitHub-hosted runners are the compilers
 (`windows-latest`, and later `windows-11-arm`, `ubuntu-24.04`,
 `ubuntu-24.04-arm`); the Mac is for local testing in VMs only.
 
-### Windows x64 status (first slice, `feat-windows-x86-bootstrap`)
-Shipped in that slice: `home.rs` (HOME/USERPROFILE), cfg-gated symlink-
+### Windows x64 status
+First slice (`feat-windows-x86-bootstrap`): `home.rs` (HOME/USERPROFILE), cfg-gated symlink-
 safe opens in the downloader (the only Windows compile break), shell
 detection + PowerShell spawn, `arcterm.ps1`, `platform.ts` keymap
 (Ctrl+Shift+letter, Alt+digit, Ctrl+Tab, Ctrl+,), `CmdOrCtrl` menu
 accelerator with macOS-only predefined items gated, OSC 7 drive-letter
 parsing, Windows font stacks, Windows destructive-command patterns,
 NSIS per-user install, Windows CI job + installer workflow.
+
+Second slice (`feat-windows-x86-vulkan`): local Gemma on the GPU.
+llama-cpp-2 0.1.160 with `vulkan` + `dynamic-backends`, Windows target
+only. Every ggml backend is a DLL next to `ArcTerm.exe`: `llama.dll`,
+`ggml.dll`, `ggml-base.dll`, one `ggml-cpu-<isa>.dll` per x86 level
+(x64 … alderlake; ggml scores them at start-up and loads the best one
+for the running CPU, which replaced the baseline-SSE2 kernels of the
+static build) and `ggml-vulkan.dll`, which loads only when the display
+driver's `vulkan-1.dll` exists — no GPU driver means CPU fallback, not
+a missing-DLL dialog at launch (the trade-off a statically linked
+Vulkan build would have forced). Plumbing: `build.rs` stages the DLLs
+from `DEP_LLAMA_BACKENDS_DIR` into `gen/ggml-runtime/` (gitignored),
+`tauri.windows.conf.json` ships them as bundle resources, and
+`load_dynamic_backends()` in `ai/local_llama.rs` registers them from
+the exe directory before the first `LlamaBackend::init()`. Both Windows
+workflows install the LunarG SDK (`VULKAN_VERSION`, cached by version)
+and build-windows.yml asserts that the exe does not import
+`vulkan-1.dll` and that a silent NSIS install lays the DLLs down.
+`/arcterm-status` prints `GPU: yes (<device> via Vulkan)` or `GPU: no`;
+CPU-only inference pins `n_threads` to the physical core count (macOS
+keeps llama.cpp's default because Metal carries the layers).
 
 Known gaps, in priority order (each is its own follow-up):
 1. **Secure-input mode has no Windows path.** ConPTY exposes no console
@@ -616,16 +638,13 @@ Known gaps, in priority order (each is its own follow-up):
    blocks closing at the wrong time, bundle `OpenConsole.exe` +
    `conpty.dll` (MIT, Windows Terminal ≥ 1.22) next to the exe —
    portable-pty prefers a sideloaded conpty.dll.
-3. **Local Gemma is CPU-only and baseline-ISA on x86.** llama-cpp-sys-2
-   derives GGML_AVX2/FMA from Rust target features, so the Windows build
-   has no AVX2 kernels. Plan: capability tiers first, then either ISA
-   flags via `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS` (forwarded by the build
-   script) with a runtime AVX2 gate, or llama-cpp-2 ≥ 0.1.160
-   `dynamic-backends` (runtime CPU variants + Vulkan as a loadable DLL).
-4. cmd.exe has no integration (unreachable in practice: PowerShell 5.1
+3. cmd.exe has no integration (unreachable in practice: PowerShell 5.1
    is always present).
-5. `release.yml` has no Windows matrix entry yet; add when the port
+4. `release.yml` has no Windows matrix entry yet; add when the port
    merges to `main`.
+5. **Capability tiers** (Port_Assessment §4) are still open: nothing
+   gates Local/Auto on RAM or on the GPU probe yet, and a weak CPU-only
+   box can still be told to run E4B Q8.
 
 The feasibility write-up behind all of this is the untracked
 `Port_Assessment_2026-10-18.md` in the repo root (main checkout only).

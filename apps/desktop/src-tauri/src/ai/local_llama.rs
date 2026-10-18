@@ -1,4 +1,6 @@
-//! Local Gemma inference via `llama-cpp-2` (Metal-accelerated on Apple Silicon).
+//! Local Gemma inference via `llama-cpp-2` — Metal on Apple Silicon; on
+//! Windows, Vulkan or the best CPU kernel set via ggml backend DLLs that
+//! are loaded at runtime (see `load_dynamic_backends`).
 //!
 //! The inference loop is CPU-bound (even with GPU layers, there's per-token
 //! orchestration) and uses the llama-cpp-2 synchronous API, so we run it on
@@ -30,8 +32,9 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
+use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::{LlamaBackendDevice, LlamaBackendDeviceType};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -79,6 +82,19 @@ pub struct LocalLlamaBackend {
     pub model_path: PathBuf,
     /// Display name used by the `AiBackend::display_name` impl.
     display_label: &'static str,
+    /// `llama_supports_gpu_offload()` as seen at load time: a GPU-class
+    /// device is registered (Metal on Apple Silicon; on Windows, the
+    /// Vulkan DLL loaded and found a driver). `/arcterm-status` shows it
+    /// because "is it actually on the GPU?" is the first question on new
+    /// hardware, and the answer is otherwise buried in the log.
+    gpu_offload: bool,
+    /// First GPU-class device, e.g. "Apple M3 Max via Metal" or
+    /// "Intel(R) Arc(TM) Graphics via Vulkan". None on CPU-only setups.
+    gpu_device: Option<String>,
+    /// Thread count for CPU-only inference; `None` leaves llama.cpp's
+    /// default when a GPU carries the layers. Decided once at load so the
+    /// per-request context creation stays cheap.
+    cpu_threads: Option<i32>,
 }
 
 impl LocalLlamaBackend {
@@ -96,9 +112,36 @@ impl LocalLlamaBackend {
     /// (ai_set_mode lazy-load, ai_set_local_model, model_download
     /// post-load) go through `load_verified` instead.
     pub fn load(path: PathBuf) -> Result<Self, String> {
+        // Must precede init: llama_backend_init only sees backends that
+        // are already registered. No-op off Windows.
+        load_dynamic_backends();
         let backend = Arc::new(
             LlamaBackend::init()
                 .map_err(|e| format!("LlamaBackend::init: {e}"))?,
+        );
+
+        // Probe once, before the model load, so a failure to find the
+        // GPU shows up in the log next to the backend list and not as a
+        // mysteriously slow first answer.
+        let gpu_offload = backend.supports_gpu_offload();
+        let devices = llama_cpp_2::list_llama_ggml_backend_devices();
+        for d in &devices {
+            log::info!(
+                "ggml device {}: {} [{} / {:?}] {} MB",
+                d.name,
+                d.description,
+                d.backend,
+                d.device_type,
+                d.memory_total / 1_048_576,
+            );
+        }
+        let gpu_device = gpu_device_label(&devices);
+        let cpu_threads = cpu_threads_for(gpu_offload);
+        log::info!(
+            "local llama: gpu_offload={} device={} cpu_threads={}",
+            gpu_offload,
+            gpu_device.as_deref().unwrap_or("none"),
+            cpu_threads.map_or_else(|| "llama.cpp default".to_string(), |n| n.to_string()),
         );
 
         // n_gpu_layers = 1000 means "offload every layer to the GPU".
@@ -142,7 +185,20 @@ impl LocalLlamaBackend {
             backend,
             model_path: path,
             display_label: "Gemma (local)",
+            gpu_offload,
+            gpu_device,
+            cpu_threads,
         })
+    }
+
+    /// Whether llama.cpp offloads this model's layers to a GPU.
+    pub fn gpu_offload(&self) -> bool {
+        self.gpu_offload
+    }
+
+    /// Description of the GPU in use, when there is one.
+    pub fn gpu_device(&self) -> Option<&str> {
+        self.gpu_device.as_deref()
     }
 
     /// SECURITY: `load` + explicit SHA re-verify against the registry
@@ -209,6 +265,7 @@ impl AiBackend for LocalLlamaBackend {
     fn stream(&self, req: AiRequest) -> BoxStream<'static, Result<String, String>> {
         let backend = self.backend.clone();
         let model = self.model.clone();
+        let cpu_threads = self.cpu_threads;
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<String, String>>();
 
@@ -252,7 +309,7 @@ impl AiBackend for LocalLlamaBackend {
         };
 
         tokio::task::spawn_blocking(move || {
-            run_inference(backend, model, prompt, template_aware, tx);
+            run_inference(backend, model, prompt, template_aware, cpu_threads, tx);
         });
 
         UnboundedReceiverStream::new(rx).boxed()
@@ -266,18 +323,28 @@ impl AiBackend for LocalLlamaBackend {
 /// own chat template (in which case it already contains any BOS tokens
 /// the template expects and we must NOT prepend another one) or by our
 /// hardcoded fallback template (which doesn't include BOS, so we add it).
+///
+/// `cpu_threads` is `Some` only for CPU-only inference (see
+/// `cpu_threads_for`); `None` keeps llama.cpp's defaults.
 fn run_inference(
     backend: Arc<LlamaBackend>,
     model: Arc<Mutex<LlamaModel>>,
     prompt: String,
     template_aware: bool,
+    cpu_threads: Option<i32>,
     tx: mpsc::UnboundedSender<Result<String, String>>,
 ) {
     let model = model.lock();
     // 1. Context.
-    let ctx_params = LlamaContextParams::default().with_n_ctx(
+    let mut ctx_params = LlamaContextParams::default().with_n_ctx(
         NonZeroU32::new(CTX_SIZE),
     );
+    if let Some(n) = cpu_threads {
+        // Prompt processing (batch) and generation both get the full
+        // physical core count; the batch pass is the one that dominates
+        // time-to-first-token with our several-hundred-token context.
+        ctx_params = ctx_params.with_n_threads(n).with_n_threads_batch(n);
+    }
     let mut ctx = match model.new_context(&backend, ctx_params) {
         Ok(c) => c,
         Err(e) => {
@@ -286,21 +353,18 @@ fn run_inference(
         }
     };
 
-    // 2. Tokenize the prompt.
-    let add_bos = if template_aware {
-        // The chat template already emits BOS tokens where the model
-        // expects them. Double-BOS produces garbage output.
-        AddBos::Never
-    } else {
-        AddBos::Always
-    };
-    let tokens = match model.str_to_token(&prompt, add_bos) {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = tx.send(Err(format!("tokenize: {e}")));
-            return;
-        }
-    };
+    // 2. Tokenize the prompt. `add_special` lets llama.cpp prepend BOS
+    // (Gemma's vocab asks for one); the chat template already emits BOS
+    // where the model expects it and double-BOS produces garbage output,
+    // so only the hardcoded fallback template gets it. `parse_special`
+    // stays on so `<start_of_turn>` markers become control tokens rather
+    // than literal text.
+    let vocab = model.vocab();
+    let tokens = vocab.tokenize(prompt.as_bytes(), !template_aware, true);
+    if tokens.is_empty() {
+        let _ = tx.send(Err("tokenize: prompt produced no tokens".into()));
+        return;
+    }
     let prompt_tokens = tokens.len() as i32;
     let n_total = prompt_tokens + MAX_NEW_TOKENS;
 
@@ -330,29 +394,35 @@ fn run_inference(
 
     let mut n_cur = prompt_tokens;
     let mut utf8_decoder = encoding_rs::UTF_8.new_decoder();
+    let mut piece_bytes: Vec<u8> = Vec::with_capacity(16);
 
     while n_cur < n_total {
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
-        if model.is_eog_token(token) {
+        if vocab.is_eog(token) {
             break;
         }
 
-        // Detokenize. The crate returns a `String` directly; the decoder
-        // is needed so multi-byte UTF-8 sequences that span token
-        // boundaries (common in languages with wide codepoints) don't
-        // come out mangled.
-        // `special: false` strips <bos>/<eos>/control tokens from output —
-        // we only want user-visible text. `lstrip: None` keeps leading
-        // spaces inside tokens intact (model naturally emits " word").
-        let piece = match model.token_to_piece(token, &mut utf8_decoder, false, None) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = tx.send(Err(format!("detokenize: {e}")));
-                return;
-            }
-        };
+        // Detokenize to bytes, then run them through a persistent UTF-8
+        // decoder so multi-byte sequences that span token boundaries
+        // (common in languages with wide codepoints) don't come out
+        // mangled. `special: false` strips <bos>/<eos>/control tokens from
+        // output — we only want user-visible text. `lstrip: None` keeps
+        // leading spaces inside tokens intact (model naturally emits
+        // " word").
+        piece_bytes.clear();
+        vocab.token_to_piece_into(token, &mut piece_bytes, false, None);
+        // decode_to_string never grows the String and silently stops at
+        // capacity, so reserve what the decoder says it may need (a lone
+        // invalid byte expands to a 3-byte U+FFFD).
+        let mut piece = String::new();
+        piece.reserve(
+            utf8_decoder
+                .max_utf8_buffer_length(piece_bytes.len())
+                .unwrap_or(piece_bytes.len() * 3 + 4),
+        );
+        let _ = utf8_decoder.decode_to_string(&piece_bytes, &mut piece, false);
         if !piece.is_empty() && tx.send(Ok(piece)).is_err() {
             // Consumer dropped — stop generating.
             return;
@@ -371,6 +441,76 @@ fn run_inference(
         n_cur += 1;
     }
 }
+
+/// Pick the device `/arcterm-status` names. GPU-class entries win because
+/// those are what llama.cpp offloads to; the CPU entry is always present,
+/// and an accelerator entry (BLAS) is not GPU offload — naming either
+/// would make the status line claim a GPU on a CPU-only box.
+fn gpu_device_label(devices: &[LlamaBackendDevice]) -> Option<String> {
+    devices
+        .iter()
+        .find(|d| {
+            matches!(
+                d.device_type,
+                LlamaBackendDeviceType::Gpu | LlamaBackendDeviceType::IntegratedGpu
+            )
+        })
+        .map(|d| format!("{} via {}", d.description, d.backend))
+}
+
+/// Thread count for CPU-only inference. llama.cpp defaults to a flat 4
+/// threads whatever the machine, which leaves most of a modern laptop
+/// idle; physical cores — not SMT siblings, which contend for the same
+/// vector units and slow matmul down — is the usual sweet spot. With GPU
+/// offload the default stays: the CPU only orchestrates, and macOS
+/// behaviour is unchanged.
+fn cpu_threads_for(gpu_offload: bool) -> Option<i32> {
+    if gpu_offload {
+        return None;
+    }
+    // num_cpus falls back to the logical count (std's
+    // available_parallelism) when it cannot read the core topology.
+    let physical = num_cpus::get_physical().max(1);
+    Some(i32::try_from(physical).unwrap_or(i32::MAX))
+}
+
+/// Windows only: register the ggml backend DLLs that ship next to the
+/// exe. Nothing is linked statically on that target (`dynamic-backends`
+/// in Cargo.toml), so without this call llama.cpp would not even have a
+/// CPU backend and every model load would fail. The exe directory is
+/// where tauri.windows.conf.json installs the DLLs — it is also Tauri's
+/// `resource_dir()` on Windows; `current_exe()` just spares threading an
+/// AppHandle through every load path. Once per process: the registry
+/// outlives `llama_backend_free`, and loading again would register each
+/// device twice.
+#[cfg(target_os = "windows")]
+fn load_dynamic_backends() {
+    static LOADED: std::sync::Once = std::sync::Once::new();
+    LOADED.call_once(|| {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        let Some(dir) = exe_dir else {
+            log::warn!("ggml backends: cannot resolve the exe directory; no backends loaded");
+            return;
+        };
+        // load_backends_from_path panics on a non-UTF-8 path. Install dirs
+        // live under the user profile, so a profile name with an unpaired
+        // surrogate would otherwise take the whole app down.
+        if dir.to_str().is_none() {
+            log::warn!(
+                "ggml backends: exe directory {} is not valid UTF-8; no backends loaded",
+                dir.display()
+            );
+            return;
+        }
+        llama_cpp_2::llama_backend::load_backends_from_path(&dir);
+        log::info!("ggml backends loaded from {}", dir.display());
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn load_dynamic_backends() {}
 
 /// Compose the plain-text content of the single user message we send.
 /// This becomes the payload the model's chat template wraps; we DON'T
@@ -413,4 +553,91 @@ fn hardcoded_gemma_template(user_content: &str) -> String {
     format!(
         "<start_of_turn>user\n{user_content}<end_of_turn>\n<start_of_turn>model\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llama_cpp_2::{LlamaBackendDevice, LlamaBackendDeviceType};
+
+    fn device(
+        index: usize,
+        description: &str,
+        backend: &str,
+        device_type: LlamaBackendDeviceType,
+    ) -> LlamaBackendDevice {
+        LlamaBackendDevice {
+            index,
+            name: format!("{backend}{index}"),
+            description: description.to_string(),
+            backend: backend.to_string(),
+            memory_total: 0,
+            memory_free: 0,
+            device_type,
+        }
+    }
+
+    #[test]
+    fn gpu_device_label_names_the_gpu_class_device_not_the_cpu() {
+        // ggml lists the CPU device first on every platform; the status
+        // line must still name the Vulkan iGPU llama.cpp offloads to.
+        let devices = [
+            device(0, "13th Gen Intel(R) Core(TM) i7", "CPU", LlamaBackendDeviceType::Cpu),
+            device(1, "Intel(R) Arc(TM) Graphics", "Vulkan", LlamaBackendDeviceType::IntegratedGpu),
+        ];
+        assert_eq!(
+            gpu_device_label(&devices).as_deref(),
+            Some("Intel(R) Arc(TM) Graphics via Vulkan")
+        );
+    }
+
+    #[test]
+    fn gpu_device_label_is_none_without_a_gpu_class_device() {
+        // BLAS registers as an accelerator; it is not GPU offload and must
+        // not make /arcterm-status claim "GPU: yes".
+        let devices = [
+            device(0, "AMD Ryzen 5", "CPU", LlamaBackendDeviceType::Cpu),
+            device(1, "BLAS", "BLAS", LlamaBackendDeviceType::Accelerator),
+        ];
+        assert_eq!(gpu_device_label(&devices), None);
+    }
+
+    /// Real-model check for the engine bump. Needs a downloaded GGUF;
+    /// run by hand with
+    /// `cargo test local_inference_smoke -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "loads a multi-GB GGUF from ~/.arcterm/models; manual only"]
+    async fn local_inference_smoke() {
+        // Surface the ggml device list + GPU probe lines under --nocapture.
+        let _ = env_logger::builder().is_test(true).try_init();
+        let spec = crate::models::REGISTRY
+            .iter()
+            .find(|s| s.is_installed())
+            .expect("no local model installed");
+        let backend = LocalLlamaBackend::load(spec.local_path().expect("model path"))
+            .expect("model load");
+        eprintln!(
+            "model={} gpu_offload={} device={:?} cpu_threads={:?}",
+            spec.id, backend.gpu_offload, backend.gpu_device, backend.cpu_threads
+        );
+        let resp = backend
+            .ask(AiRequest {
+                prompt: "Reply with exactly one word: pong".to_string(),
+                context: None,
+                mode: AiMode::Chat,
+            })
+            .await
+            .expect("ask");
+        eprintln!("response={:?}", resp.text);
+        assert!(!resp.text.is_empty(), "model produced no text");
+    }
+
+    #[test]
+    fn cpu_threads_are_only_pinned_without_gpu_offload() {
+        // With a GPU, llama.cpp's own default stays (macOS unchanged);
+        // CPU-only inference gets a positive core count.
+        assert_eq!(cpu_threads_for(true), None);
+        let n = cpu_threads_for(false).expect("CPU-only path pins a thread count");
+        assert!(n >= 1, "thread count must be positive, got {n}");
+    }
 }

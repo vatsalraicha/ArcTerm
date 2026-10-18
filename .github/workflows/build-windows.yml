@@ -31,15 +31,57 @@ jobs:
   build:
     name: Build installer (x64)
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       # llama-cpp-sys-2 runs bindgen at build time; the runner image ships
       # LLVM here. Same reason as the Windows job in ci.yml.
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      # LunarG SDK release the Vulkan backend is compiled against. Keep in
+      # sync with ci.yml; the cache key follows it.
+      VULKAN_VERSION: "1.4.357.0"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ggml-vulkan needs the LunarG SDK at build time (Vulkan headers,
+      # vulkan-1.lib for the import, glslc for the shader compile). The
+      # installed tree is cached by version; a miss costs a ~290 MB
+      # download plus a two-minute silent install. Save happens right
+      # after the install rather than in a post step so a red build
+      # still warms the cache for the next attempt.
+      - name: Restore Vulkan SDK
+        id: vulkan-sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "VulkanSDK-Installer.exe"
+          curl.exe -sSfL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait -NoNewWindow
+
+      - name: Save Vulkan SDK
+        if: steps.vulkan-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-x64
+
+      # llama-cpp-sys-2's build script reads VULKAN_SDK for the import
+      # library; CMake's FindVulkan reads the same variable; glslc comes
+      # from Bin.
+      - name: Export Vulkan SDK location
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path "$sdk\Lib\vulkan-1.lib")) { throw "Vulkan SDK not found at $sdk" }
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$sdk"
+          Add-Content $env:GITHUB_PATH "$sdk\Bin"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -70,6 +112,51 @@ jobs:
       # and WiX on first use.
       - name: Build + bundle
         run: pnpm --filter @arcterm/desktop tauri build --target x86_64-pc-windows-msvc
+
+      # The point of dynamic backends is that ArcTerm.exe itself must not
+      # import vulkan-1.dll (a machine without a GPU driver could not start
+      # it otherwise) and must import the shared llama/ggml libraries that
+      # the installer ships. dumpbin comes with MSVC; vswhere locates it.
+      - name: Check exe imports and staged backend DLLs
+        shell: pwsh
+        run: |
+          $release = "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release"
+          $exe = Get-ChildItem $release -Filter *.exe | Where-Object { $_.Name -in @("ArcTerm.exe", "arcterm-desktop.exe") } | Select-Object -First 1
+          if (-not $exe) { throw "no ArcTerm executable under $release" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          $deps = & $dumpbin /NOLOGO /DEPENDENTS $exe.FullName
+          Write-Host "== $($exe.Name) imports =="
+          $deps
+          if ($deps -match "vulkan-1\.dll") { throw "$($exe.Name) imports vulkan-1.dll directly; Vulkan must stay inside ggml-vulkan.dll" }
+          foreach ($dll in "llama.dll", "ggml.dll", "ggml-base.dll") {
+            if (-not ($deps -match [regex]::Escape($dll))) { throw "$($exe.Name) does not import $dll; dynamic linking did not take effect" }
+          }
+          $staged = Get-ChildItem apps/desktop/src-tauri/gen/ggml-runtime -Filter *.dll | Select-Object -ExpandProperty Name
+          Write-Host "== staged runtime DLLs: $($staged -join ', ') =="
+          foreach ($required in "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll") {
+            if ($staged -notcontains $required) { throw "$required missing from gen/ggml-runtime" }
+          }
+          if (-not ($staged | Where-Object { $_ -like "ggml-cpu-*.dll" })) { throw "no ggml-cpu-*.dll variants staged" }
+
+      # Silent per-user install of the NSIS artifact, then make sure the
+      # DLLs actually landed next to ArcTerm.exe. Catches a bundler-side
+      # regression (wrong resource target, dropped glob) without a tester.
+      - name: Smoke-test the installer layout
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS setup.exe produced" }
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+          $installDir = Join-Path $env:LOCALAPPDATA "ArcTerm"
+          if (-not (Test-Path $installDir)) { throw "silent install did not create $installDir" }
+          Write-Host "== $installDir =="
+          Get-ChildItem $installDir | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          foreach ($required in "ArcTerm.exe", "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll") {
+            if (-not (Test-Path (Join-Path $installDir $required))) { throw "$required missing from the installed app" }
+          }
+          if (-not (Get-ChildItem $installDir -Filter "ggml-cpu-*.dll")) { throw "no ggml-cpu-*.dll in the installed app" }
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
