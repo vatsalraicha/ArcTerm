@@ -192,6 +192,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # MSVC's compiler front-end (c1) still enforces MAX_PATH (260) on
+      # source paths. The Vulkan shader generator is an ExternalProject
+      # nested under <target>\<triple>\release\build\llama-cpp-sys-2-<hash>\
+      # out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\…, and its
+      # try-compile source sits at 264 characters from the default target
+      # directory ("Cannot open source file: … testCCompiler.c"). A
+      # junction on the workspace drive (D:\t) takes 45 characters off
+      # every build path, while rust-cache and the artifact globs keep
+      # using the real apps/desktop/src-tauri/target directory behind it.
+      - name: Short target path
+        shell: pwsh
+        run: |
+          $real = Join-Path $env:GITHUB_WORKSPACE "apps\desktop\src-tauri\target"
+          New-Item -ItemType Directory -Force $real | Out-Null
+          $link = Join-Path (Split-Path -Qualifier $env:GITHUB_WORKSPACE) "t"
+          New-Item -ItemType Junction -Path $link -Target $real | Out-Null
+          Add-Content $env:GITHUB_ENV "CARGO_TARGET_DIR=$link"
+          "CARGO_TARGET_DIR=$link -> $real"
+
       # ggml-vulkan needs the LunarG SDK at build time (Vulkan headers,
       # vulkan-1.lib for the import, glslc for the shader compile). The
       # installed tree is cached by version; a miss costs a ~290 MB
