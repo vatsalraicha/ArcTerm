@@ -111,8 +111,10 @@ jobs:
       # advisory against a crate NOT listed here will fail CI, which is
       # what we want.
       #
-      # Last reviewed: 2026-09-07 against tauri 2.10.3 + llama-cpp-2 0.1.
-      # The 2026-09-07 sweep (h2 / quick-xml / quinn-proto / anyhow) needed
+      # Last reviewed: 2026-10-18 against tauri 2.10.3 + llama-cpp-2 0.1.
+      # The 2026-09-07 sweep (h2 / quick-xml / quinn-proto / anyhow) and
+      # the 2026-10-18 sweep (quinn-proto 0.11.19, rustls 0.23.46 — seven
+      # advisories, RUSTSEC-2026-0285/0338/0340/0343/0346/0348/0349) needed
       # NO new entries here -- every advisory was fixable by version bump.
       # See Package_Vulnerability_Issues.md for the per-advisory triage.
       #
