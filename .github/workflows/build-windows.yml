@@ -151,7 +151,7 @@ jobs:
       - name: Build + bundle
         run: pnpm --filter @arcterm/desktop tauri build --target x86_64-pc-windows-msvc
 
-      # The point of dynamic backends is that ArcTerm.exe itself must not
+      # The point of dynamic backends is that the executable itself must not
       # import vulkan-1.dll (a machine without a GPU driver could not start
       # it otherwise) and must import the shared llama/ggml libraries that
       # the installer ships. dumpbin comes with MSVC; vswhere locates it.
@@ -179,7 +179,7 @@ jobs:
           if (-not ($staged | Where-Object { $_ -like "ggml-cpu-*.dll" })) { throw "no ggml-cpu-*.dll variants staged" }
 
       # Silent per-user install of the NSIS artifact, then make sure the
-      # DLLs actually landed next to ArcTerm.exe. Catches a bundler-side
+      # DLLs actually landed next to the executable. Catches a bundler-side
       # regression (wrong resource target, dropped glob) without a tester.
       - name: Smoke-test the installer layout
         shell: pwsh
@@ -191,7 +191,13 @@ jobs:
           if (-not (Test-Path $installDir)) { throw "silent install did not create $installDir" }
           Write-Host "== $installDir =="
           Get-ChildItem $installDir | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
-          foreach ($required in "ArcTerm.exe", "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll") {
+          # Tauri keeps the Cargo binary name (arcterm-desktop.exe) for the
+          # installed executable; the product name only shows up in the
+          # shortcuts and the installer file name.
+          $exe = @("arcterm-desktop.exe", "ArcTerm.exe") | Where-Object { Test-Path (Join-Path $installDir $_) } | Select-Object -First 1
+          if (-not $exe) { throw "no ArcTerm executable in the installed app" }
+          Write-Host "installed executable: $exe"
+          foreach ($required in "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll") {
             if (-not (Test-Path (Join-Path $installDir $required))) { throw "$required missing from the installed app" }
           }
           if (-not (Get-ChildItem $installDir -Filter "ggml-cpu-*.dll")) { throw "no ggml-cpu-*.dll in the installed app" }

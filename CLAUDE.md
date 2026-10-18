@@ -608,7 +608,8 @@ NSIS per-user install, Windows CI job + installer workflow.
 
 Second slice (`feat-windows-x86-vulkan`): local Gemma on the GPU.
 llama-cpp-2 0.1.160 with `vulkan` + `dynamic-backends`, Windows target
-only. Every ggml backend is a DLL next to `ArcTerm.exe`: `llama.dll`,
+only. Every ggml backend is a DLL next to the executable
+(`arcterm-desktop.exe` — Tauri keeps the Cargo binary name): `llama.dll`,
 `ggml.dll`, `ggml-base.dll`, one `ggml-cpu-<isa>.dll` per x86 level
 (x64 … alderlake; ggml scores them at start-up and loads the best one
 for the running CPU, which replaced the baseline-SSE2 kernels of the

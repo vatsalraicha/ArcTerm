@@ -69,7 +69,7 @@ What to expect in this alpha:
   session, or an outdated driver) and fell back to the CPU, which works
   but is slow on a laptop. The CPU path picks the kernels for your
   processor at start-up (AVX2 / AVX-512 when available). The `llama.dll`
-  and `ggml*.dll` files the installer places next to `ArcTerm.exe` are
+  and `ggml*.dll` files the installer places next to `arcterm-desktop.exe` are
   required — the model cannot load without them.
 - **Known gap: password prompts.** On macOS ArcTerm notices when a program
   reads a password and hides its input editor. Windows ConPTY offers no

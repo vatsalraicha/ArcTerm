@@ -11,7 +11,7 @@ fn main() {
 
 /// Windows: copy `llama.dll`, `ggml*.dll` and the per-ISA / Vulkan backend
 /// modules into `gen/ggml-runtime/` so `tauri.windows.conf.json` can glob
-/// them into the installer next to `ArcTerm.exe`.
+/// them into the installer next to the executable (`arcterm-desktop.exe`).
 ///
 /// Why a staging directory instead of pointing the bundler at the build
 /// output: llama-cpp-sys-2's OUT_DIR carries a content hash in its name,
