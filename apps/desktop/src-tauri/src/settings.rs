@@ -187,9 +187,7 @@ pub struct SettingsStore {
 impl SettingsStore {
     /// Open (or create) the settings file at `~/.arcterm/config.json`.
     pub fn open() -> Result<Self, String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME not set".to_string())?;
+        let home = crate::home::dir().ok_or_else(|| crate::home::MISSING.to_string())?;
         let dir = home.join(".arcterm");
         fs::create_dir_all(&dir)
             .map_err(|e| format!("create {}: {e}", dir.display()))?;

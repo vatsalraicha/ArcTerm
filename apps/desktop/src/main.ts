@@ -21,6 +21,7 @@ import { GlobalSearchOverlay } from "./global-search-overlay";
 import { Sidebar } from "./sidebar";
 import { AiPanel, type ExplainTarget } from "./ai-panel";
 import { aiAsk, aiIsAvailable, extractCommand, hasDangerousInvisibles, type AiContext } from "./ai";
+import { matchAppShortcut } from "./platform";
 import { CompletionOverlay, type CompletionItem } from "./completion-overlay";
 import {
   isInternalCommand,
@@ -560,89 +561,59 @@ async function boot(mounts: Mounts): Promise<void> {
 
   // --- Global keybindings ----------------------------------------------
   // Attached to window so focus in any child (editor, sidebar search) sees
-  // the shortcut. We check `metaKey` (⌘ on macOS); Ctrl is intentionally
-  // left to shell-level semantics (Ctrl+C forwards to PTY etc).
+  // the shortcut. Which chords count is a per-platform question (⌘ on
+  // macOS, Ctrl+Shift elsewhere) answered in platform.ts; this handler
+  // only maps the resulting action onto the UI. Plain Ctrl is left to
+  // shell-level semantics (Ctrl+C forwards to the PTY etc).
   window.addEventListener("keydown", (ev) => {
-    if (!ev.metaKey || ev.altKey) return;
-
-    // ⌘T — new session
-    if (ev.key === "t" && !ev.shiftKey) {
-      ev.preventDefault();
-      manager.create().catch((err) =>
-        console.error("create session failed", err),
-      );
+    const shortcut = matchAppShortcut(ev);
+    if (!shortcut) return;
+    // AI shortcuts are inert without a backend; let the key fall through
+    // rather than swallowing it.
+    if ((shortcut.kind === "ai-command" || shortcut.kind === "ai-explain") && !aiAvailable) {
       return;
     }
-
-    // ⌘W — close active session (with running-confirm)
-    if (ev.key === "w" && !ev.shiftKey) {
-      ev.preventDefault();
-      const active = manager.active;
-      if (active) void sidebar.closeSession(active.id);
-      return;
-    }
-
-    // ⌘1..⌘9 — switch to session by ordinal
-    if (/^[1-9]$/.test(ev.key) && !ev.shiftKey) {
-      ev.preventDefault();
-      const s = manager.byOrdinal(Number.parseInt(ev.key, 10));
-      if (s) void manager.switchTo(s.id);
-      return;
-    }
-
-    // ⌘⇧] / ⌘⇧[  — next / previous tab (matches VSCode convention).
-    //
-    // Match on ev.code (physical key), not ev.key. When Shift is held,
-    // ev.key transforms `[` → `{` and `]` → `}` on a US layout, so the
-    // earlier `ev.key === "["` check never fired. ev.code is layout-
-    // independent and unaffected by modifiers.
-    if (ev.shiftKey && (ev.code === "BracketRight" || ev.code === "BracketLeft")) {
-      ev.preventDefault();
-      const sessions = manager.list();
-      if (sessions.length < 2) return;
-      const curId = manager.activeSessionId;
-      const curIdx = sessions.findIndex((s) => s.id === curId);
-      if (curIdx === -1) return;
-      const delta = ev.code === "BracketRight" ? 1 : -1;
-      const next = sessions[(curIdx + delta + sessions.length) % sessions.length];
-      void manager.switchTo(next.id);
-      return;
-    }
-
-    // ⌘, — open settings panel. macOS convention; available regardless
-    // of AI availability.
-    if (ev.key === "," && !ev.shiftKey) {
-      ev.preventDefault();
-      if (!settingsPanel.isOpen()) void settingsPanel.open();
-      return;
-    }
-
-    // ⌘⇧F — global search (commands + session output). Matches VSCode's
-    // "Find in Files" convention. Available regardless of AI state — it
-    // doesn't touch any AI backend.
-    //
-    // Match on ev.code so a non-US layout where Shift+F doesn't produce
-    // an "f" still triggers. (ev.key on Shift+F is "F" on most layouts,
-    // but ev.code is layout-stable.)
-    if (ev.shiftKey && ev.code === "KeyF") {
-      ev.preventDefault();
-      if (!globalSearch.isOpen()) globalSearch.open();
-      return;
-    }
-
-    // ⌘K — open AI panel in command-generation mode.
-    // ⌘⇧E — open AI panel in explain mode (uses last error, falls back to
-    //       editor contents or last command if no error is on record).
-    if (!aiAvailable) return;
-    if (ev.key === "k" && !ev.shiftKey) {
-      ev.preventDefault();
-      if (!aiPanel.isOpen()) void aiPanel.openForCommand();
-      return;
-    }
-    if (ev.shiftKey && ev.key.toLowerCase() === "e") {
-      ev.preventDefault();
-      if (!aiPanel.isOpen()) void aiPanel.openForExplain();
-      return;
+    ev.preventDefault();
+    switch (shortcut.kind) {
+      case "new-session":
+        manager.create().catch((err) =>
+          console.error("create session failed", err),
+        );
+        return;
+      case "close-session": {
+        const active = manager.active;
+        if (active) void sidebar.closeSession(active.id);
+        return;
+      }
+      case "switch-session": {
+        const s = manager.byOrdinal(shortcut.ordinal);
+        if (s) void manager.switchTo(s.id);
+        return;
+      }
+      case "next-session":
+      case "prev-session": {
+        const sessions = manager.list();
+        if (sessions.length < 2) return;
+        const curId = manager.activeSessionId;
+        const curIdx = sessions.findIndex((s) => s.id === curId);
+        if (curIdx === -1) return;
+        const delta = shortcut.kind === "next-session" ? 1 : -1;
+        const next = sessions[(curIdx + delta + sessions.length) % sessions.length];
+        void manager.switchTo(next.id);
+        return;
+      }
+      case "settings":
+        if (!settingsPanel.isOpen()) void settingsPanel.open();
+        return;
+      case "global-search":
+        if (!globalSearch.isOpen()) globalSearch.open();
+        return;
+      case "ai-command":
+        if (!aiPanel.isOpen()) void aiPanel.openForCommand();
+        return;
+      case "ai-explain":
+        if (!aiPanel.isOpen()) void aiPanel.openForExplain();
+        return;
     }
   });
 

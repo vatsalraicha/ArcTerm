@@ -48,8 +48,8 @@ pub struct ModelSpec {
 impl ModelSpec {
     /// Where the downloaded file should live on disk.
     pub fn local_path(&self) -> Option<PathBuf> {
-        let home = std::env::var_os("HOME")?;
-        Some(PathBuf::from(home).join(".arcterm/models").join(self.filename))
+        let home = crate::home::dir()?;
+        Some(home.join(".arcterm").join("models").join(self.filename))
     }
 
     /// True iff `local_path()` exists.

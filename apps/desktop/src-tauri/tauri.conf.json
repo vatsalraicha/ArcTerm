@@ -34,11 +34,17 @@
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/icon.icns"
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "category": "DeveloperTool",
     "shortDescription": "AI-powered modern terminal",
-    "longDescription": "ArcTerm is an open-source modern terminal with Claude-powered AI features."
+    "longDescription": "ArcTerm is an open-source modern terminal with Claude-powered AI features.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   },
   "plugins": {}
 }

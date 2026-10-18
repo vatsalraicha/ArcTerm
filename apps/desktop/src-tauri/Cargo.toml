@@ -55,11 +55,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1"
 futures = "0.3"
 
-# Local inference. The "metal" feature compiles Metal shaders during the
-# cargo build; it's auto-selected for aarch64-apple-darwin but we spell it
-# out here so future changes to the crate's default features can't silently
-# disable GPU acceleration.
-llama-cpp-2 = { version = "0.1", features = ["metal"] }
+# Local inference. Base dependency for every platform; the GPU backend
+# feature is added per target below. Off macOS this is a CPU-only build
+# (no Vulkan / CUDA yet — see CLAUDE.md "Platform branches").
+llama-cpp-2 = { version = "0.1" }
 
 # Model downloader. rustls-tls avoids depending on the system OpenSSL
 # install (homebrew/system LibreSSL mismatch is a real pain); "stream"
@@ -84,6 +83,14 @@ encoding_rs = "0.8"
 # directly from our own code.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The "metal" feature compiles Metal shaders during the cargo build; it's
+# auto-selected for aarch64-apple-darwin but we spell it out so future
+# changes to the crate's default features can't silently disable GPU
+# acceleration. Scoped to macOS: cargo unifies features per target, so
+# Windows and Linux builds never ask llama-cpp-sys-2 for Metal.
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "0.1", features = ["metal"] }
 
 [features]
 # Tauri v2 expects a `custom-protocol` feature flag for the production build.

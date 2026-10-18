@@ -1,12 +1,9 @@
 # Continuous integration for ArcTerm.
 #
-# Runs on every push to main and every PR. Single-platform (macOS) because
-# that's our only officially-supported target — `llama-cpp-2`'s Metal
-# feature is macOS-only, and cross-platform Tauri builds introduce enough
-# platform-specific quirks (webkit2gtk on Linux, webview2 on Windows)
-# that supporting them would double our CI surface for no user benefit
-# today. Linux / Windows users are welcome to fork and add their own
-# workflows; the Rust + TS code itself is portable.
+# Runs on every push to main and every PR, plus the platform integration
+# branches (main-windows-x86, …). Two jobs: macOS, the shipping target,
+# with cargo-audit; and Windows x64, in alpha. Linux is not built yet —
+# see CLAUDE.md "Platform branches" for the plan and the branch naming.
 #
 # What this verifies:
 #   * Rust compiles (`cargo check`)
@@ -22,9 +19,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, main-windows-x86]
   pull_request:
-    branches: [main]
+    branches: [main, main-windows-x86]
 
 # Cancel superseded runs so a rapid-fire push only uses one runner-slot.
 # Keeps our free GH Actions minutes from piling up on no-op commits.
@@ -158,3 +155,57 @@ jobs:
           --ignore RUSTSEC-2025-0098
           --ignore RUSTSEC-2025-0100
           --ignore RUSTSEC-2026-0097
+
+  # Windows x64. Mirrors the macOS job minus cargo-audit: the advisory
+  # list is identical (same Cargo.lock) and one scan per push is enough.
+  # A cold-cache run is ~30 min because llama-cpp-sys-2 builds llama.cpp
+  # with MSVC and runs bindgen, which needs libclang — the runner image
+  # ships LLVM under C:\Program Files\LLVM. Warm runs take a few minutes.
+  check-windows:
+    name: Check (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: windows-x64
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm --filter @arcterm/desktop vite:build
+
+      - name: Cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --all-targets
+
+      - name: Cargo clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test

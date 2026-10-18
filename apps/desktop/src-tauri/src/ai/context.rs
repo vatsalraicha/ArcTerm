@@ -84,7 +84,7 @@ impl AiContext {
             "- Shell: {}\n",
             self.shell.as_deref().unwrap_or("/bin/zsh")
         ));
-        out.push_str("- OS: macOS\n");
+        out.push_str(&format!("- OS: {}\n", os_display_name()));
         if let Some(branch) = &self.git_branch {
             if !branch.is_empty() {
                 out.push_str(&format!("- Git branch: {branch}\n"));
@@ -140,7 +140,7 @@ impl AiContext {
         } else {
             out.push_str("- Shell: /bin/zsh\n");
         }
-        out.push_str("- OS: macOS\n");
+        out.push_str(&format!("- OS: {}\n", os_display_name()));
         if let Some(branch) = &self.git_branch {
             if !branch.is_empty() {
                 out.push_str(&format!("- Git branch: {}\n", sanitize_one_line(branch)));
@@ -184,6 +184,18 @@ impl AiContext {
     }
 }
 
+/// The OS as the model should hear it. `std::env::consts::OS` says
+/// "macos"; the prompt has always said "macOS" and Gemma's answers are
+/// sensitive to the spelling it saw in training.
+fn os_display_name() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
 /// Build the richest context we can from the Rust side. Callers give us
 /// whatever they already know (cwd, branch, failing command/output) and we
 /// fill in the rest (shell, recent history, dir listing).
@@ -208,7 +220,10 @@ pub fn enrich(
     let mut ctx = seed;
 
     if ctx.shell.is_none() {
-        ctx.shell = std::env::var("SHELL").ok();
+        // The shell ArcTerm actually spawned, not a bare $SHELL read:
+        // Windows has no $SHELL, and telling the model "/bin/zsh" there
+        // gets zsh syntax back for a PowerShell session.
+        ctx.shell = Some(crate::pty::default_shell());
     }
 
     if include_history && ctx.recent_commands.is_empty() {
